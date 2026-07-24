@@ -228,7 +228,7 @@ Account secondAcc = accountRepository.findByAccountNumberForUpdate(second); <br>
 <br>
 
 **P.S) PK의 중요성에 대해:**
-InnoDB의 스토리지 엔진에서는 PK를 정의하지 않으면 내부적으로 일련번호 칼럼을 추가합니다. 이는 PK를 auto_increment로 생성한 것과 똑같지만 Inno 스토리지 엔진이 내부적으로 생성한 칼럼은 사용자가 전혀 접근할 수 없습니다. 그렇기에 사용자가 접근하여 사용할 수 있도록 PK값을 설정하는 것이 훨씬 유리합니다.
+InnoDB의 스토리지 엔진에서는 PK를 정의하지 않으면 내부적으로 일련번호 칼럼을 추가합니다. 이는 PK를 auto_increment로 생성한 것과 똑같지만 InnoDB 스토리지 엔진이 내부적으로 생성한 칼럼은 사용자가 전혀 접근할 수 없습니다. 그렇기에 사용자가 접근하여 사용할 수 있도록 PK값을 설정하는 것이 훨씬 유리합니다.
 
 
 
