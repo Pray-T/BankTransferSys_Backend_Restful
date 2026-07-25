@@ -1,3 +1,7 @@
+## 또 다른 포트폴리오:<br>
+[Cursor Agent를 이용하여 GithubCopilot을 저렴하게 사용해보기](https://github.com/Pray-T/GitHub-Copilot-With-Cursor.git) <br>
+[AWS에 배포하여 운영했던 JWT+Redis 이중 토큰 인증과 실시간 채팅등을 갖춘 웹 앱.](https://github.com/Pray-T/ReadyPlz-Production_main.git)
+
 | 인사말 |
 
 안녕하세요, 먼저 귀한 시간을 내어 저의 깃허브에 방문해주신 것에 대한 감사를 먼저 드립니다.
