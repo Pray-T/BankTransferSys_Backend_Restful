@@ -52,69 +52,71 @@ public class TransferService {
 
     @Transactional
     public TransferResponse createTransfer(TransferRequest request, String idempotencyKey) {
-        validateRequest(request); 
+        validateRequest(request);
 
         String sourceAccountNumber = request.getSourceAccountNumber();
         String targetAccountNumber = request.getTargetAccountNumber();
 
-        transferThrottleService.enforceCooldown(sourceAccountNumber, targetAccountNumber);
+        // 해시와 실제 이체에 동일 스케일(KRW 정수, HALF_UP) 적용
+        BigDecimal amount = MoneyUtil.scaleKRW(request.getAmount());
+        if (amount == null || amount.signum() <= 0) {
+            throw new ConflictException("이체 금액은 0보다 커야 합니다.");
+        }
 
+        // 1) 멱등성 먼저: COMPLETED 재조회가 쿨다운(429)에 가려지지 않도록 함
         String requestHash = HashUtil.sha256Hex(sourceAccountNumber
                 + "|" + targetAccountNumber
-                + "|" + request.getAmount().setScale(2).toPlainString());
+                + "|" + amount.toPlainString());
 
-        IdempotencyStartResult start = idempotencyService.beginOrGetExisting(idempotencyKey, "TRANSFER", requestHash); 
-        IdempotencyRecord idem = start.record();  
+        IdempotencyStartResult start = idempotencyService.beginOrGetExisting(idempotencyKey, "TRANSFER", requestHash);
+        IdempotencyRecord idem = start.record();
 
-        Long previousTransferId = idem.getResourceId(); 
-        if (idem.getStatus().name().equals("COMPLETED") && previousTransferId != null) { 
-            // Return previous result
-            Transfer previous = transferRepository.findById(previousTransferId) 
+        Long previousTransferId = idem.getResourceId();
+        if (idem.getStatus() == IdempotencyStatus.COMPLETED && previousTransferId != null) {
+            Transfer previous = transferRepository.findById(previousTransferId)
                     .orElseThrow(() -> new NotFoundException("이전 이체 결과를 찾을 수 없습니다."));
             return toResponse(previous, previous.getSourceAccount().getBalance(), previous.getTargetAccount().getBalance());
         }
 
-        if (!start.newlyCreated() && idem.getStatus() == IdempotencyStatus.PENDING) { 
+        if (!start.newlyCreated()) {
+            // PENDING(처리 중) 또는 FAILED reclaim 실패 → 동일 키 동시 요청 차단
             throw new InProgressException("요청이 처리 중입니다.");
         }
 
-        String a = sourceAccountNumber;
-        String b = targetAccountNumber;
-        String first = a.compareTo(b) <= 0 ? a : b;
-        String second = a.compareTo(b) <= 0 ? b : a;
-
-        Account firstAcc = accountRepository.findByAccountNumberForUpdate(first)
-                .orElseThrow(() -> new NotFoundException("계좌를 찾을 수 없습니다: " + first));
-        Account secondAcc = accountRepository.findByAccountNumberForUpdate(second)
-                .orElseThrow(() -> new NotFoundException("계좌를 찾을 수 없습니다: " + second));
-
-        Account source = a.equals(first) ? firstAcc : secondAcc;
-        Account target = a.equals(first) ? secondAcc : firstAcc;
-
-        if (source.getStatus() != AccountStatus.ACTIVE || target.getStatus() != AccountStatus.ACTIVE) {
-            throw new ConflictException("비활성화된 계좌 상태입니다.");
-        }
-        if (!Constants.DEFAULT_CURRENCY_CODE.equals(source.getCurrencyCode())
-                || !Constants.DEFAULT_CURRENCY_CODE.equals(target.getCurrencyCode())) {
-            throw new ConflictException("지원되지 않는 통화 코드입니다.");
-        }
-
-        BigDecimal amount = MoneyUtil.scaleKRW(request.getAmount());
-        // 잔액 체크는 Account.withdraw() 내부에서 수행되므로 여기서는 제거 가능하지만,
-        // 명시적인 에러 메시지나 빠른 실패를 위해 남겨둘 수도 있습니다.
-        // 현재는 Account.withdraw()에 위임하는 것이 깔끔하므로 제거합니다.
-
-        Transfer transfer;
-        BigDecimal newSourceBalance;
-        BigDecimal newTargetBalance;
+        // 2) 이 요청이 멱등성 키를 소유한 경우에만 쿨다운·이체 진행
+        //    계좌 검증 실패 등도 finalizeFailure로 PENDING 누수 방지
+        boolean finalizedSuccess = false;
         try {
+            transferThrottleService.enforceCooldown(sourceAccountNumber, targetAccountNumber);
+
+            String a = sourceAccountNumber;
+            String b = targetAccountNumber;
+            String first = a.compareTo(b) <= 0 ? a : b;
+            String second = a.compareTo(b) <= 0 ? b : a;
+
+            Account firstAcc = accountRepository.findByAccountNumberForUpdate(first)
+                    .orElseThrow(() -> new NotFoundException("계좌를 찾을 수 없습니다: " + first));
+            Account secondAcc = accountRepository.findByAccountNumberForUpdate(second)
+                    .orElseThrow(() -> new NotFoundException("계좌를 찾을 수 없습니다: " + second));
+
+            Account source = a.equals(first) ? firstAcc : secondAcc;
+            Account target = a.equals(first) ? secondAcc : firstAcc;
+
+            if (source.getStatus() != AccountStatus.ACTIVE || target.getStatus() != AccountStatus.ACTIVE) {
+                throw new ConflictException("비활성화된 계좌 상태입니다.");
+            }
+            if (!Constants.DEFAULT_CURRENCY_CODE.equals(source.getCurrencyCode())
+                    || !Constants.DEFAULT_CURRENCY_CODE.equals(target.getCurrencyCode())) {
+                throw new ConflictException("지원되지 않는 통화 코드입니다.");
+            }
+
             source.withdraw(amount);
             target.deposit(amount);
 
-            newSourceBalance = source.getBalance();
-            newTargetBalance = target.getBalance();
+            BigDecimal newSourceBalance = source.getBalance();
+            BigDecimal newTargetBalance = target.getBalance();
 
-            transfer = new Transfer(
+            Transfer transfer = new Transfer(
                     source,
                     target,
                     amount,
@@ -131,16 +133,19 @@ public class TransferService {
             accountTransactionRepository.save(credit);
 
             idempotencyService.finalizeSuccess(idem, transfer.getId());
+            finalizedSuccess = true;
             transferThrottleService.markSuccess(source.getAccountNumber(), target.getAccountNumber());
+
+            log.info("이체 완료: {} -> {} 금액={}, 통화={}",
+                    source.getAccountNumber(), target.getAccountNumber(), amount, Constants.DEFAULT_CURRENCY_CODE);
+
+            return toResponse(transfer, newSourceBalance, newTargetBalance);
         } catch (RuntimeException ex) {
-            idempotencyService.finalizeFailure(idem);
+            if (!finalizedSuccess) {
+                idempotencyService.finalizeFailure(idem);
+            }
             throw ex;
         }
-
-        log.info("이체 완료: {} -> {} 금액={}, 통화={}",
-                source.getAccountNumber(), target.getAccountNumber(), amount, Constants.DEFAULT_CURRENCY_CODE);
-
-        return toResponse(transfer, newSourceBalance, newTargetBalance);
     }
 
     @Transactional(readOnly = true)

@@ -22,6 +22,7 @@
 | Database | MySQL 8 |
 | Cache | Redis (멱등성키 / 쿨다운키) |
 | API Docs | springdoc-openapi 2.6.0 (Swagger UI) |
+| Test | JUnit 5 + Testcontainers (MySQL 8 / Redis 7) |
 | Build | Gradle |
 
 ## 프로젝트 구조
@@ -45,6 +46,14 @@ BankTranferSys_Backend_Restful/
     └── resources/
         ├── application.properties
         └── application-dev.properties
+
+src/test/
+├── java/com/banktransfer/
+│   ├── TransferConcurrencyIT.java      # 동시성 정합성 통합 테스트
+│   ├── TransferIdempotencyIT.java      # 멱등성/쿨다운 통합 테스트
+│   └── support/AbstractContainerIT.java # Testcontainers(MySQL/Redis) 기반 클래스
+└── resources/
+    └── application-test.properties
 ```
 
 ## 실행 방법
@@ -85,7 +94,22 @@ gradlew.bat bootRun
 
 ## 테스트
 
-현재 `src/test` 디렉터리 및 자동화 테스트 코드는 포함되어 있지 않습니다. 동시성·멱등성 검증은 수동 API 호출 및 MySQL/Redis 직접 확인으로 수행했습니다.
+Testcontainers(MySQL 8 + Redis 7) 기반 통합 테스트로 동시성·멱등성을 검증합니다. **Docker가 필요합니다.**
+
+```bash
+# Windows
+gradlew.bat test
+
+# macOS / Linux
+./gradlew test
+```
+
+| 테스트 클래스 | 검증 내용 |
+|--------------|----------|
+| `TransferConcurrencyIT` | 동일 출금 계좌 동시 이체 잔액 정합성, 교차 이체(A↔B) 데드락 부재 |
+| `TransferIdempotencyIT` | 동일 키 재요청/동시 요청 단일 이체, COMPLETED 쿨다운 스킵, 새 키 429, payload 충돌 409 |
+
+Docker가 없으면 `@Testcontainers(disabledWithoutDocker = true)`에 의해 해당 테스트는 스킵됩니다.
 
 ## 아키텍처 다이어그램
 
@@ -153,24 +177,28 @@ sequenceDiagram
     TC->>TS: createTransfer(request, key)
     Note over TS: 1단계: 요청 검증
     TS->>TS: validateRequest()<br/>(출금=입금 계좌 여부, 금액 검증)
-    Note over TS,Redis: 2단계: 쿨다운 체크
+    Note over TS,Redis: 2단계: 멱등성 체크 (쿨다운보다 우선)
+    TS->>IS: beginOrGetExisting(key, hash)
+    IS->>Redis: GET / SETNX(idempo:TRANSFER:key)
+    Redis-->>IS: 결과 반환
+    alt 이미 완료된 요청 (COMPLETED)
+        IS-->>TS: 기존 결과 반환
+        Note over TS: 쿨다운 스킵 — 안전 재시도 보장
+        TS-->>C: 201 Created (이전 결과)
+    else 처리 중 (PENDING) 또는 FAILED reclaim 실패
+        IS-->>TS: InProgressException
+        TS-->>C: 202 Accepted
+    else FAILED → PENDING 원자적 reclaim 성공 / 신규 키
+        IS-->>TS: newlyCreated=true (키 소유)
+    end
+    Note over TS,Redis: 3단계: 쿨다운 체크 (키 소유 시에만)
     TS->>TTS: enforceCooldown()
     TTS->>Redis: hasKey(trans:cooldown:출금->입금)
     Redis-->>TTS: 존재 여부 반환
     alt 쿨다운 중
         TTS-->>TS: TransferCooldownException
+        TS->>IS: finalizeFailure (PENDING 누수 방지)
         TS-->>C: 429 TOO_MANY_REQUESTS
-    end
-    Note over TS,Redis: 3단계: 멱등성 체크
-    TS->>IS: beginOrGetExisting(key, hash)
-    IS->>Redis: SETNX(idempo:TRANSFER:key)
-    Redis-->>IS: 결과 반환
-    alt 이미 완료된 요청
-        IS-->>TS: 기존 결과 반환
-        TS-->>C: 201 Created (이전 결과)
-    else 처리 중인 요청
-        IS-->>TS: InProgressException
-        TS-->>C: 202 Accepted
     end
     Note over TS,MySQL: 4단계: 계좌 잠금 (데드락 방지)
     TS->>TS: 계좌번호 정렬 (작은 값 먼저)
@@ -180,7 +208,7 @@ sequenceDiagram
     TS->>AR: findByAccountNumberForUpdate(second)
     AR->>MySQL: SELECT ... FOR UPDATE
     MySQL-->>AR: 두 번째 계좌 (잠금 획득)
-    Note over TS: 5단계: 계좌 상태/통화 검증
+    Note over TS: 5단계: 계좌 상태/통화 검증<br/>(실패 시에도 finalizeFailure)
     Note over TS,MySQL: 6단계: 이체 실행
     TS->>TS: source.withdraw(amount)
     TS->>TS: target.deposit(amount)
@@ -200,18 +228,18 @@ sequenceDiagram
 
 ```mermaid
 graph LR
-    REQ["이체 요청"] --> CD{"쿨다운키\n(Redis)"}
+    REQ["이체 요청"] --> ID{"멱등성키\n(Redis)"}
+    ID -->|"이미 완료된 요청"| R3["이전 결과 반환\n(쿨다운 스킵)"]
+    ID -->|"처리 중 / reclaim 실패"| R2["202 처리 중"]
+    ID -->|"신규 또는 FAILED reclaim"| CD{"쿨다운키\n(Redis)"}
     CD -->|"10초 내 동일 방향(출금→입금) 재요청"| R1["429 차단"]
-    CD -->|"통과"| ID{"멱등성키\n(Redis)"}
-    ID -->|"처리 중인 요청"| R2["202 처리 중"]
-    ID -->|"이미 완료된 요청"| R3["이전 결과 반환"]
-    ID -->|"신규 요청"| PL{"비관적 잠금\nSELECT FOR UPDATE\n(MySQL)"}
+    CD -->|"통과"| PL{"비관적 잠금\nSELECT FOR UPDATE\n(MySQL)"}
     PL --> OL{"낙관적 잠금 @Version\n(안전망, 정상경로 거의 미발동)"}
     OL -->|"버전 불일치 시"| R4["409 충돌"]
     OL -->|"정상"| OK["이체 완료"]
 ```
 
-> **역할 구분:** 쿨다운은 동일 방향 연속 요청(남용/연타) 완화, 멱등성키는 동일 요청의 안전한 재시도, `FOR UPDATE`는 잔액 정합성, `@Version`은 비관적 잠금이 누락된 경로를 대비한 보조 계층입니다.
+> **역할 구분:** 멱등성키를 **먼저** 검사해 완료된 동일 요청의 재시도가 쿨다운(429)에 가려지지 않게 합니다. 쿨다운은 키를 새로 소유한 요청에만 적용되어 동일 방향 연타를 완화합니다. `FOR UPDATE`는 잔액 정합성, `@Version`은 비관적 잠금이 누락된 경로를 대비한 보조 계층입니다.
 
 ---
 
@@ -252,17 +280,20 @@ MySQL InnoDB 기본 격리 수준인 **REPEATABLE READ**를 유지하고, 이체
 | 상태 | 응답 |
 |------|------|
 | 처리 중 (PENDING) 동일 키 재요청 | `202 Accepted` — “요청이 처리 중입니다.” |
-| 완료 (COMPLETED) 동일 키 재요청 | `201 Created` — 이전 이체 결과 반환 |
+| 완료 (COMPLETED) 동일 키 재요청 | `201 Created` — 이전 이체 결과 반환 (**쿨다운 검사 전**에 처리) |
+| 실패 (FAILED) 동일 키 재요청 | reclaim 락으로 `FAILED→PENDING` 원자 전환 후 재시도. 동시 재획득 실패 시 `202` |
 | 동일 키 + 다른 payload | `409 Conflict` |
 
 - Redis 키: `idempo:TRANSFER:{Idempotency-Key}`
 - TTL: **10초** (포트폴리오/로컬 데모용 짧은 값. 실서비스에서는 재시도 창에 맞게 늘리는 것이 일반적입니다.)
+- 검증·이체 실패 시 `finalizeFailure`로 `FAILED`를 기록해 **PENDING 누수**를 막습니다.
 
 **P.S) 진행 중 요청: Polling vs Fast-Fail**  
 PENDING 중복 요청에 대해 서버에서 폴링 대기 후 결과를 주는 방식도 검토했으나, 스레드 점유와 실패 시 대기 연장 리스크 때문에 **즉시 202 반환(Fast-Fail)** 을 선택했습니다.
 
 **쿨다운키 (Cooldown Key)**  
-**동일한 출금 → 입금 방향** 이체가 성공한 뒤 10초 안에 다시 들어오면 `429 Too Many Requests`로 차단합니다. (역방향 B→A는 별도 키.) 멱등성키(안전 재시도)와 달리, **연타·남용성 연속 요청**을 줄이는 목적입니다.
+**동일한 출금 → 입금 방향** 이체가 성공한 뒤 10초 안에 **새 멱등성 키**로 다시 들어오면 `429 Too Many Requests`로 차단합니다. (역방향 B→A는 별도 키.)  
+멱등성키(안전 재시도)와 달리 **연타·남용성 연속 요청**을 줄이는 목적이며, **COMPLETED 재조회 경로에는 적용하지 않습니다.**
 
 - Redis 키: `trans:cooldown:{출금계좌}->{입금계좌}`
 - TTL: **10초** (데모용)

@@ -84,6 +84,10 @@ public class Account extends BaseTimeEntity {
         return balance;
     }
 
+    public void setBalance(BigDecimal balance) {
+        this.balance = balance;
+    }
+
     public String getCurrencyCode() {
         return currencyCode;
     }
