@@ -68,18 +68,16 @@ src/test/
 
 ### 설정
 
-1. 접속 정보는 **환경 변수로 오버라이드**할 수 있으며, 미설정 시 `application-dev.properties`의 로컬 실습용 기본값을 사용합니다.
+접속 정보는 **환경 변수로 오버라이드**할 수 있으며, 미설정 시 `application-dev.properties`의 로컬 실습용 기본값을 사용합니다.
 
-   | 환경 변수 | 기본값 | 설명 |
-   |-----------|--------|------|
-   | `DB_HOST` / `DB_PORT` / `DB_NAME` | `127.0.0.1` / `3306` / `bank_TransferSys` | MySQL 접속 정보 |
-   | `DB_USERNAME` / `DB_PASSWORD` | `your_mysql_username` / `your_mysql_password` | MySQL 계정 (실서비스에서는 반드시 환경 변수로 주입) |
-   | `REDIS_HOST` / `REDIS_PORT` / `REDIS_DATABASE` | `127.0.0.1` / `6379` / `0` | Redis 접속 정보 |
-
-2. 실서비스에서는 위 기본값을 사용하지 말고 **환경 변수 또는 별도 profile**로 자격증명을 주입하세요. (커밋된 기본값은 로컬 실습 편의를 위한 예시입니다.)
+| 환경 변수 | 기본값 | 설명 |
+|-----------|--------|------|
+| `DB_HOST` / `DB_PORT` / `DB_NAME` | `127.0.0.1` / `3306` / `bank_TransferSys` | MySQL 접속 정보 |
+| `DB_USERNAME` / `DB_PASSWORD` | `your_mysql_username` / `your_mysql_password` | MySQL 계정 |
+| `REDIS_HOST` / `REDIS_PORT` / `REDIS_DATABASE` | `127.0.0.1` / `6379` / `0` | Redis 접속 정보 |
 
 ```bash
-# 예시 (macOS / Linux)
+# 환경 변수로 기본값 오버라이드 예시 (macOS / Linux)
 export DB_PASSWORD='your_mysql_password'
 ./gradlew bootRun
 ```
@@ -279,7 +277,7 @@ graph LR
 <img width="848" height="102" alt="스크린샷 2025-12-12 222936" src="https://github.com/user-attachments/assets/33e9edc3-fff0-4148-8d44-d57be80b7031" />
 
 **문제점 분석:**  
-동일 레코드에 대한 동시 쓰기 경쟁이 커지면 대기·타임아웃이 늘어 실서비스 처리량이 급격히 떨어질 수 있습니다. Serializable은 정합성은 높지만, 동시 읽기·대량 처리 관점의 비용이 큽니다. “격리 수준만 올리면 된다”는 접근은 이체 도메인에 그대로 쓰기 어렵다고 판단했습니다.
+동일 레코드에 대한 동시 쓰기 경쟁이 커지면 대기·타임아웃이 늘어 처리량이 급격히 떨어질 수 있습니다. Serializable은 정합성은 높지만, 동시 읽기·대량 처리 관점의 비용이 큽니다. “격리 수준만 올리면 된다”는 접근은 이체 도메인에 그대로 쓰기 어렵다고 판단했습니다.
 
 **애플리케이션에 적용한 해결:**  
 MySQL InnoDB 기본 격리 수준인 **REPEATABLE READ**를 유지하고, 이체 시점에만 `SELECT ... FOR UPDATE`로 필요한 계좌를 잠급니다. 여기에 Redis 멱등성키·쿨다운키, `@Version`을 더해 다층으로 보호합니다.
@@ -302,7 +300,7 @@ MySQL InnoDB 기본 격리 수준인 **REPEATABLE READ**를 유지하고, 이체
 | 동일 키 + 다른 payload | `409 Conflict` |
 
 - Redis 키: `idempo:TRANSFER:{Idempotency-Key}`
-- TTL: **10초** (포트폴리오/로컬 데모용 짧은 값. 실서비스에서는 재시도 창에 맞게 늘리는 것이 일반적입니다.)
+- TTL: **10초** (포트폴리오/로컬 데모용 짧은 값)
 - 검증·이체 실패 시 `finalizeFailure`로 `FAILED`를 기록해 **PENDING 누수**를 막습니다.
 
 **P.S) 커밋-Redis 정합성 (afterCommit 확정)**  
