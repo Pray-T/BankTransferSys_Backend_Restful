@@ -12,6 +12,7 @@
 - Redis **Idempotency-Key** / **쿨다운 키**로 중복·연속 이체 요청 차단
 - MySQL **Serializable 세션 실험**에서 락 대기 타임아웃을 확인한 뒤, **REPEATABLE READ + 비관적 잠금**으로 전환한 근거 문서화
 - `@Version` 낙관적 잠금을 비관적 잠금의 **추가 안전망**으로 배치 (정상 이체 경로에서는 거의 발동하지 않음)
+- 이체 성공 확정(Redis `COMPLETED`/쿨다운)을 **트랜잭션 커밋 이후(afterCommit)** 로 반영해 "DB 미커밋 + Redis 완료" 상태 불일치 방지
 - (보조) 약 200만 건 고객 데이터로 **복합 인덱스** 조회 실험
 
 ## 기술 스택
@@ -231,7 +232,9 @@ sequenceDiagram
     TS->>MySQL: Transfer 저장 (COMPLETED)
     TS->>MySQL: AccountTransaction 저장 (DEBIT)
     TS->>MySQL: AccountTransaction 저장 (CREDIT)
-    Note over TS,Redis: 7단계: 후처리
+    Note over TS,MySQL: 7단계: 트랜잭션 커밋 (durable 보장)
+    TS->>MySQL: COMMIT
+    Note over TS,Redis: 8단계: 커밋 이후 확정 (afterCommit)
     TS->>IS: finalizeSuccess(record, transferId)
     IS->>Redis: SET(idempo:TRANSFER:key, COMPLETED, 잔여TTL)
     TS->>TTS: markSuccess(source, target)
@@ -303,6 +306,17 @@ MySQL InnoDB 기본 격리 수준인 **REPEATABLE READ**를 유지하고, 이체
 - Redis 키: `idempo:TRANSFER:{Idempotency-Key}`
 - TTL: **10초** (포트폴리오/로컬 데모용 짧은 값. 실서비스에서는 재시도 창에 맞게 늘리는 것이 일반적입니다.)
 - 검증·이체 실패 시 `finalizeFailure`로 `FAILED`를 기록해 **PENDING 누수**를 막습니다.
+
+**P.S) 커밋-Redis 정합성 (afterCommit 확정)**  
+성공 확정(`COMPLETED` 기록 + 쿨다운 설정)은 이체 로직 도중이 아니라 `TransactionSynchronization.afterCommit()`에서 실행합니다. DB가 **durable하게 커밋된 뒤에만** Redis에 반영하므로, 이체 저장 후 커밋이 실패해도 Redis에는 `COMPLETED`가 남지 않습니다.
+
+| 시점 | 처리 |
+|------|------|
+| 이체 로직 중 예외 | `finalizeFailure`(`FAILED`) 후 롤백 — PENDING 누수 방지 |
+| 커밋 성공 | `afterCommit`에서 `finalizeSuccess`(`COMPLETED`) + 쿨다운 설정 |
+| 저장 성공 후 **커밋 실패** | `afterCommit` 미실행 → Redis는 `PENDING` 유지 → TTL 만료/`reclaim`으로 회수 |
+
+이체가 실제로 커밋되지 않았는데 멱등성 캐시가 `COMPLETED`로 남아, 이후 재조회(`findById`)가 실패하는 상태 불일치를 방지하기 위한 설계입니다. (트랜잭션 동기화가 비활성인 예외적 상황에서는 즉시 반영으로 폴백합니다.)
 
 **P.S) 진행 중 요청: Polling vs Fast-Fail**  
 PENDING 중복 요청에 대해 서버에서 폴링 대기 후 결과를 주는 방식도 검토했으나, 스레드 점유와 실패 시 대기 연장 리스크 때문에 **즉시 202 반환(Fast-Fail)** 을 선택했습니다.

@@ -7,6 +7,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import com.banktransfer.dto.TransferRequest;
 import com.banktransfer.dto.TransferResponse;
@@ -84,8 +86,11 @@ public class TransferService {
         }
 
         // 2) 이 요청이 멱등성 키를 소유한 경우에만 쿨다운·이체 진행
-        //    계좌 검증 실패 등도 finalizeFailure로 PENDING 누수 방지
-        boolean finalizedSuccess = false;
+        //    성공 확정(COMPLETED/쿨다운)은 DB 커밋 이후로 미뤄 "DB엔 이체가 없는데
+        //    Redis엔 COMPLETED"인 불일치를 방지한다(afterCommit). 실패는 롤백 전
+        //    finalizeFailure로 FAILED를 기록해 PENDING 누수를 막는다.
+        SuccessConfirmation confirmation = new SuccessConfirmation();
+        boolean deferredCommitHook = registerSuccessConfirmation(idem, confirmation);
         try {
             transferThrottleService.enforceCooldown(sourceAccountNumber, targetAccountNumber);
 
@@ -132,19 +137,80 @@ public class TransferService {
                     target, transfer, TransactionType.CREDIT, amount, newTargetBalance);
             accountTransactionRepository.save(credit);
 
-            idempotencyService.finalizeSuccess(idem, transfer.getId());
-            finalizedSuccess = true;
-            transferThrottleService.markSuccess(source.getAccountNumber(), target.getAccountNumber());
+            if (deferredCommitHook) {
+                // 커밋 성공 후 afterCommit에서 finalizeSuccess/markSuccess가 실행되도록 결과만 기록
+                confirmation.markReady(transfer.getId(), source.getAccountNumber(), target.getAccountNumber());
+            } else {
+                // 트랜잭션 동기화가 비활성인 예외적 상황: 즉시 반영으로 폴백
+                idempotencyService.finalizeSuccess(idem, transfer.getId());
+                transferThrottleService.markSuccess(source.getAccountNumber(), target.getAccountNumber());
+            }
 
             log.info("이체 완료: {} -> {} 금액={}, 통화={}",
                     source.getAccountNumber(), target.getAccountNumber(), amount, Constants.DEFAULT_CURRENCY_CODE);
 
             return toResponse(transfer, newSourceBalance, newTargetBalance);
         } catch (RuntimeException ex) {
-            if (!finalizedSuccess) {
-                idempotencyService.finalizeFailure(idem);
-            }
+            idempotencyService.finalizeFailure(idem);
             throw ex;
+        }
+    }
+
+    /**
+     * 이체 성공 확정(멱등성 COMPLETED 기록 + 쿨다운 설정)을 트랜잭션 커밋 이후로 미룬다.
+     * DB가 durable하게 커밋된 뒤에만 Redis에 COMPLETED를 반영해, 커밋 실패 시
+     * "Redis는 COMPLETED인데 DB엔 이체가 없는" 불일치를 방지한다.
+     *
+     * @return 커밋 훅 등록 성공 여부. 동기화가 비활성이면 false를 반환해 호출부가 즉시 반영으로 폴백한다.
+     */
+    private boolean registerSuccessConfirmation(IdempotencyRecord idem, SuccessConfirmation confirmation) {
+        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+            return false;
+        }
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                if (confirmation.isReady()) {
+                    idempotencyService.finalizeSuccess(idem, confirmation.transferId());
+                    transferThrottleService.markSuccess(
+                            confirmation.sourceAccountNumber(), confirmation.targetAccountNumber());
+                }
+            }
+        });
+        return true;
+    }
+
+    /**
+     * afterCommit 콜백이 참조하는 성공 이체 결과 홀더.
+     * markReady 호출 이후에만(=이체 로직이 정상 완료된 경우에만) 커밋 시 Redis 확정이 실행된다.
+     */
+    private static final class SuccessConfirmation {
+        private boolean ready;
+        private Long transferId;
+        private String sourceAccountNumber;
+        private String targetAccountNumber;
+
+        void markReady(Long transferId, String sourceAccountNumber, String targetAccountNumber) {
+            this.transferId = transferId;
+            this.sourceAccountNumber = sourceAccountNumber;
+            this.targetAccountNumber = targetAccountNumber;
+            this.ready = true;
+        }
+
+        boolean isReady() {
+            return ready;
+        }
+
+        Long transferId() {
+            return transferId;
+        }
+
+        String sourceAccountNumber() {
+            return sourceAccountNumber;
+        }
+
+        String targetAccountNumber() {
+            return targetAccountNumber;
         }
     }
 
