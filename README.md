@@ -4,8 +4,6 @@
 
 > 개인 프로젝트 · Spring Boot 3.3 / Java 17 / MySQL 8 / Redis
 
-> **저장소명 안내:** 저장소/디렉터리명은 초기 생성 당시의 표기(`BankTranferSys`, *Transfer*의 오타)를 URL 호환을 위해 유지하고 있습니다. 정식 명칭은 **Bank Transfer System**입니다.
-
 ## 이 프로젝트에서 증명하는 것
 
 - `SELECT ... FOR UPDATE` + **계좌번호 정렬 잠금**으로 교차 이체 데드락 방지
