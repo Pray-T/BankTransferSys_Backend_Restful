@@ -4,6 +4,8 @@
 
 > 개인 프로젝트 · Spring Boot 3.3 / Java 17 / MySQL 8 / Redis
 
+> **저장소명 안내:** 저장소/디렉터리명은 초기 생성 당시의 표기(`BankTranferSys`, *Transfer*의 오타)를 URL 호환을 위해 유지하고 있습니다. 정식 명칭은 **Bank Transfer System**입니다.
+
 ## 이 프로젝트에서 증명하는 것
 
 - `SELECT ... FOR UPDATE` + **계좌번호 정렬 잠금**으로 교차 이체 데드락 방지
@@ -39,7 +41,8 @@ BankTranferSys_Backend_Restful/
     │   ├── controller/       # Transfer, Account, DevData(dev 전용)
     │   ├── dto/
     │   ├── exception/        # GlobalExceptionHandler + 도메인 예외
-    │   ├── model/            # Account, Customer, Transfer, AccountTransaction ...
+    │   ├── model/            # JPA 엔티티(Account, Customer, Transfer, AccountTransaction 등)
+    │   │                      #  + IdempotencyRecord(Redis 저장용 POJO, 엔티티 아님)
     │   ├── repository/
     │   ├── service/          # Transfer, Idempotency, TransferThrottle, Account
     │   └── util/
@@ -66,8 +69,21 @@ src/test/
 
 ### 설정
 
-1. `src/main/resources/application-dev.properties`에서 MySQL·Redis 접속 정보를 로컬 환경에 맞게 수정합니다.
-2. DB 비밀번호 등 민감 정보는 **환경 변수 또는 별도 profile**로 분리하는 것을 권장합니다. (현재 저장소의 dev profile은 로컬 실습용 예시입니다.)
+1. 접속 정보는 **환경 변수로 오버라이드**할 수 있으며, 미설정 시 `application-dev.properties`의 로컬 실습용 기본값을 사용합니다.
+
+   | 환경 변수 | 기본값 | 설명 |
+   |-----------|--------|------|
+   | `DB_HOST` / `DB_PORT` / `DB_NAME` | `127.0.0.1` / `3306` / `bank_TransferSys` | MySQL 접속 정보 |
+   | `DB_USERNAME` / `DB_PASSWORD` | `your_mysql_username` / `your_mysql_password` | MySQL 계정 (실서비스에서는 반드시 환경 변수로 주입) |
+   | `REDIS_HOST` / `REDIS_PORT` / `REDIS_DATABASE` | `127.0.0.1` / `6379` / `0` | Redis 접속 정보 |
+
+2. 실서비스에서는 위 기본값을 사용하지 말고 **환경 변수 또는 별도 profile**로 자격증명을 주입하세요. (커밋된 기본값은 로컬 실습 편의를 위한 예시입니다.)
+
+```bash
+# 예시 (macOS / Linux)
+export DB_PASSWORD='your_mysql_password'
+./gradlew bootRun
+```
 
 ### 애플리케이션 실행
 
