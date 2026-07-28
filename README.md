@@ -300,7 +300,7 @@ MySQL InnoDB 기본 격리 수준인 **REPEATABLE READ**를 유지하고, 이체
 | 동일 키 + 다른 payload | `409 Conflict` |
 
 - Redis 키: `idempo:TRANSFER:{Idempotency-Key}`
-- TTL: **10초** (포트폴리오/로컬 데모용 짧은 값)
+- TTL: **24시간** (`app.idempotency.ttl-seconds=86400`, 트랜잭션/락 대기보다 충분히 길게 유지)
 - 검증·이체 실패 시 `finalizeFailure`로 `FAILED`를 기록해 **PENDING 누수**를 막습니다.
 
 **P.S) 커밋-Redis 정합성 (afterCommit 확정)**  
