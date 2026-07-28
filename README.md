@@ -300,7 +300,7 @@ MySQL InnoDB 기본 격리 수준인 **REPEATABLE READ**를 유지하고, 이체
 | 동일 키 + 다른 payload | `409 Conflict` |
 
 - Redis 키: `idempo:TRANSFER:{Idempotency-Key}`
-- TTL: **24시간** (`app.idempotency.ttl-seconds=86400`, 트랜잭션/락 대기보다 충분히 길게 유지)
+- TTL: **24시간(86400s)** — 트랜잭션/락 대기보다 길게 설정해 PENDING 만료로 인한 이중 이체·COMPLETED 미기록을 방지
 - 검증·이체 실패 시 `finalizeFailure`로 `FAILED`를 기록해 **PENDING 누수**를 막습니다.
 
 **P.S) 커밋-Redis 정합성 (afterCommit 확정)**  
@@ -310,7 +310,7 @@ MySQL InnoDB 기본 격리 수준인 **REPEATABLE READ**를 유지하고, 이체
 |------|------|
 | 이체 로직 중 예외 | `finalizeFailure`(`FAILED`) 후 롤백 — PENDING 누수 방지 |
 | 커밋 성공 | `afterCommit`에서 `finalizeSuccess`(`COMPLETED`) + 쿨다운 설정 |
-| 저장 성공 후 **커밋 실패** | `afterCommit` 미실행 → Redis는 `PENDING` 유지 → TTL 만료/`reclaim`으로 회수 |
+| 저장 성공 후 **커밋 실패** | `afterCommit` 미실행 → Redis는 `PENDING` 유지 → TTL이 24h로 길어져 만료 회수는 느림. **실패 기록(`FAILED`)된 키의 실질 재시도·회수는 `reclaim`(FAILED→PENDING)** |
 
 이체가 실제로 커밋되지 않았는데 멱등성 캐시가 `COMPLETED`로 남아, 이후 재조회(`findById`)가 실패하는 상태 불일치를 방지하기 위한 설계입니다. (트랜잭션 동기화가 비활성인 예외적 상황에서는 즉시 반영으로 폴백합니다.)
 
