@@ -1,8 +1,15 @@
 # Bank Transfer System Backend (RESTful)
-
 은행 이체 REST API — **MySQL 동시성 정합성**과 **Redis 멱등성/스로틀**을 중심으로 구현한 백엔드 포트폴리오입니다.
+## 인사말
 
-> 개인 프로젝트 · Spring Boot 3.3 / Java 17 / MySQL 8 / Redis
+안녕하세요. 시간을 내어 방문해 주셔서 감사합니다.  
+팀과 시너지를 내면서도, 혼자 깊게 고민하며 성장하는 개발자가 되고자 합니다.  
+이 저장소는 은행 이체 REST API를 통해 **MySQL 동시성 제어**와 **인덱스 기반 성능 이해**를 정리한 포트폴리오입니다.
+
+## 다른 포트폴리오
+
+- [Cursor Agent로 GitHub Copilot을 저렴하게 사용해보기](https://github.com/Pray-T/GitHub-Copilot-With-Cursor.git)
+- [AWS에 배포·운영한 JWT+Redis 이중 토큰 인증과 실시간 채팅 웹 앱](https://github.com/Pray-T/ReadyPlz-Production_main.git)
 
 ## 이 프로젝트에서 증명하는 것
 
@@ -393,8 +400,6 @@ WHERE name LIKE 'ql%'
 
 로컬 MySQL에서 동일 조건 조회 시, 인덱스 미적용 약 **0.031s**, 적용 후 약 **0.016s**로 측정되었습니다(약 48% 단축).
 
-> **해석 시 주의:** 절대 시간이 짧고, 당시 측정은 클라이언트 wall-clock 중심이라 **캐시 히트·환경 편차** 영향을 받을 수 있습니다. 데이터 규모·조회 빈도가 커질수록 인덱스 효과가 더 분명해지는 경향이 있으며, 면접/리뷰 시에는 `EXPLAIN`의 `type` / `rows` / `Extra`를 함께 보는 것이 더 신뢰도 높습니다.
-
 **인덱스 사용 전:**
 
 <img width="1702" height="65" alt="스크린샷 2025-12-12 220726" src="https://github.com/user-attachments/assets/bf9fe8a9-1de2-4f82-9fd1-a81669512276" />
@@ -406,16 +411,5 @@ WHERE name LIKE 'ql%'
 **P.S) PK:** InnoDB는 PK가 없으면 내부 일련번호 컬럼을 만드는데, 애플리케이션에서 접근할 수 없습니다. 접근 가능한 PK를 명시하는 편이 유리합니다.
 
 ---
-
-## 인사말
-
-안녕하세요. 시간을 내어 방문해 주셔서 감사합니다.  
-팀과 시너지를 내면서도, 혼자 깊게 고민하며 성장하는 개발자가 되고자 합니다.  
-이 저장소는 은행 이체 REST API를 통해 **MySQL 동시성 제어**와 **인덱스 기반 성능 이해**를 정리한 포트폴리오입니다.
-
-## 다른 포트폴리오
-
-- [Cursor Agent로 GitHub Copilot을 저렴하게 사용해보기](https://github.com/Pray-T/GitHub-Copilot-With-Cursor.git)
-- [AWS에 배포·운영한 JWT+Redis 이중 토큰 인증과 실시간 채팅 웹 앱](https://github.com/Pray-T/ReadyPlz-Production_main.git)
 
 읽어 주셔서 감사합니다.
