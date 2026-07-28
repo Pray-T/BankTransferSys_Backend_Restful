@@ -6,43 +6,24 @@ import jakarta.validation.constraints.DecimalMin;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
+import lombok.Setter;
 
+@Getter
+@Setter
+@NoArgsConstructor
 public class TransferRequest {
 
     @NotBlank
     @Size(max = 64)
-    private String sourceAccountNumber; 
+    private String sourceAccountNumber;
 
     @NotBlank
     @Size(max = 64)
     private String targetAccountNumber;
 
     @NotNull
-    @DecimalMin(value = "1") 
+    @DecimalMin(value = "1")
     private BigDecimal amount;
-
-    public String getSourceAccountNumber() {
-        return sourceAccountNumber;
-    }
-
-    public void setSourceAccountNumber(String sourceAccountNumber) {
-        this.sourceAccountNumber = sourceAccountNumber;
-    }
-
-    public String getTargetAccountNumber() {
-        return targetAccountNumber;
-    }
-
-    public void setTargetAccountNumber(String targetAccountNumber) {
-        this.targetAccountNumber = targetAccountNumber;
-    }
-
-    public BigDecimal getAmount() {
-        return amount;
-    }
-
-    public void setAmount(BigDecimal amount) {
-        this.amount = amount;
-    }
 }
-

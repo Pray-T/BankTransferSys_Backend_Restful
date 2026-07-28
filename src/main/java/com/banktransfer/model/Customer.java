@@ -12,12 +12,19 @@ import jakarta.persistence.Id;
 import jakarta.persistence.Index;
 import jakarta.persistence.OneToMany;
 import jakarta.persistence.Table;
+import lombok.AccessLevel;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
+import lombok.Setter;
 
+@Getter
+@Setter
+@NoArgsConstructor
 @Entity
 @Table(
     name = "customers",
     indexes = {
-        @Index(name = "idx_customer_name_combined", columnList = "name, bank, gender") 
+        @Index(name = "idx_customer_name_combined", columnList = "name, bank, gender")
     }
 )
 public class Customer extends BaseTimeEntity {
@@ -32,9 +39,9 @@ public class Customer extends BaseTimeEntity {
     public static final String BANK_KAKAO = "KAKAO";
     public static final String BANK_TOSS = "TOSS";
 
-    
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
+    @Setter(AccessLevel.NONE)
     private Long id;
 
     @Column(name = "name", nullable = false, length = 100)
@@ -49,51 +56,12 @@ public class Customer extends BaseTimeEntity {
     @Column(name = "gender", length = 10)
     private String gender;
 
+    @Setter(AccessLevel.NONE)
     @OneToMany(mappedBy = "customer", cascade = CascadeType.ALL, orphanRemoval = true)
-    private List<Account> accounts = new ArrayList<>(); 
-
-    public Long getId() {
-        return id;
-    }
-
-    public String getName() {
-        return name;
-    }
-
-    public void setName(String name) {
-        this.name = name;
-    }
-
-    public String getBank() {
-        return bank;
-    }
-
-    public void setBank(String bank) {
-        this.bank = bank;
-    }
-
-    public Integer getAge() {
-        return age;
-    }
-
-    public void setAge(Integer age) {
-        this.age = age;
-    }
-
-    public String getGender() {
-        return gender;
-    }
-
-    public void setGender(String gender) {
-        this.gender = gender;
-    }
-
-    public List<Account> getAccounts() { 
-        return accounts; 
-    }
+    private List<Account> accounts = new ArrayList<>();
 
     public void addAccount(Account account) {
         this.accounts.add(account);
-        account.setCustomer(this); // 반대편(Account)에도 나(Customer)를 설정
+        account.setCustomer(this);
     }
 }

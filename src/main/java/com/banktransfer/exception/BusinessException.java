@@ -1,5 +1,8 @@
 package com.banktransfer.exception;
 
+import lombok.Getter;
+
+@Getter
 public class BusinessException extends RuntimeException {
     private final AppErrorCode errorCode;
 
@@ -7,9 +10,4 @@ public class BusinessException extends RuntimeException {
         super(message);
         this.errorCode = errorCode;
     }
-
-    public AppErrorCode getErrorCode() {
-        return errorCode;
-    }
 }
-

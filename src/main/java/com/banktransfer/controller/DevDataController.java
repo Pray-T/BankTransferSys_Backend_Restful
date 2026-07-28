@@ -6,12 +6,13 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.Profile;
 import org.springframework.http.ResponseEntity;
-import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
@@ -19,6 +20,8 @@ import org.springframework.web.bind.annotation.RestController;
 import com.banktransfer.model.Account;
 import com.banktransfer.model.Customer;
 import com.banktransfer.repository.CustomerRepository;
+
+import jakarta.persistence.EntityManager;
 
 @RestController
 @RequestMapping("/api/dev")
@@ -42,21 +45,25 @@ public class DevDataController {
     };
 
     private final CustomerRepository customerRepository;
+    private final EntityManager entityManager;
+    private final TransactionTemplate transactionTemplate;
 
-    public DevDataController(CustomerRepository customerRepository) {
+    public DevDataController(
+            CustomerRepository customerRepository,
+            EntityManager entityManager,
+            TransactionTemplate transactionTemplate) {
         this.customerRepository = customerRepository;
+        this.entityManager = entityManager;
+        this.transactionTemplate = transactionTemplate;
     }
 
-    
     @PostMapping("/generate-accounts")
-    @Transactional
     public ResponseEntity<Map<String, Object>> generateDummyCustomerWithAccount() {
         int totalCount = 2_000_000;     // 총 200만 건 생성
         int batchSize = 10_000;         // 한 번에 1만 건씩 배치 저장
         int createdCount = 0;
 
-        Customer sample = null;
-        String sampleAccountNumber = null;
+        AtomicReference<SampleCustomer> sampleRef = new AtomicReference<>();
 
         for (int offset = 0; offset < totalCount; offset += batchSize) {
             int currentBatchSize = Math.min(batchSize, totalCount - offset);
@@ -76,34 +83,60 @@ public class DevDataController {
                 batch.add(customer);
             }
 
-            List<Customer> savedBatch = customerRepository.saveAll(batch);
+            final int batchOffset = offset;
+            final int batchCurrentSize = currentBatchSize;
+            transactionTemplate.executeWithoutResult(status -> {
+                List<Customer> savedBatch = customerRepository.saveAll(batch);
+                entityManager.flush();
+
+                if (sampleRef.get() == null && !savedBatch.isEmpty()) {
+                    Customer first = savedBatch.get(0);
+                    String accountNumber = first.getAccounts().isEmpty()
+                            ? null
+                            : first.getAccounts().get(0).getAccountNumber();
+                    sampleRef.set(new SampleCustomer(
+                            first.getId(),
+                            first.getName(),
+                            first.getAge(),
+                            first.getBank(),
+                            first.getGender(),
+                            accountNumber));
+                }
+
+                entityManager.clear();
+            });
+
             createdCount += currentBatchSize;
-
-            if (sample == null && !savedBatch.isEmpty()) {
-                sample = savedBatch.get(0);
-                sampleAccountNumber = sample.getAccounts().isEmpty()
-                        ? null
-                        : sample.getAccounts().get(0).getAccountNumber();
-            }
-
-            log.info("DevDataController: batch saved, offset={}, batchSize={}, createdSoFar={}",
-                    offset, currentBatchSize, createdCount);
+            log.info("DevDataController: batch committed, offset={}, batchSize={}, createdSoFar={}",
+                    batchOffset, batchCurrentSize, createdCount);
         }
 
+        SampleCustomer sample = sampleRef.get();
         log.info("DevDataController: created {} dummy customers in total (sampleId={}, sampleAccount={})",
-                createdCount, sample != null ? sample.getId() : null, sampleAccountNumber);
+                createdCount,
+                sample != null ? sample.id() : null,
+                sample != null ? sample.accountNumber() : null);
 
         Map<String, Object> body = new HashMap<>();
         body.put("message", "더미 고객 및 계좌가 생성되었습니다.");
         body.put("createdCustomerCount", createdCount);
-        body.put("sampleCustomerId", sample != null ? sample.getId() : null);
-        body.put("sampleName", sample != null ? sample.getName() : null);
-        body.put("sampleAge", sample != null ? sample.getAge() : null);
-        body.put("sampleBank", sample != null ? sample.getBank() : null);
-        body.put("sampleGender", sample != null ? sample.getGender() : null);
-        body.put("sampleAccountNumber", sampleAccountNumber);
+        body.put("sampleCustomerId", sample != null ? sample.id() : null);
+        body.put("sampleName", sample != null ? sample.name() : null);
+        body.put("sampleAge", sample != null ? sample.age() : null);
+        body.put("sampleBank", sample != null ? sample.bank() : null);
+        body.put("sampleGender", sample != null ? sample.gender() : null);
+        body.put("sampleAccountNumber", sample != null ? sample.accountNumber() : null);
 
         return ResponseEntity.ok(body);
+    }
+
+    private record SampleCustomer(
+            Long id,
+            String name,
+            Integer age,
+            String bank,
+            String gender,
+            String accountNumber) {
     }
 
     private String randomName(int minLength, int maxLength) {
