@@ -19,7 +19,6 @@
 | Database | MySQL 8 |
 | Cache | Redis (멱등성키 / 쿨다운키) |
 | API Docs | springdoc-openapi 2.6.0 (Swagger UI) |
-| Test | JUnit 5 (로컬 MySQL / Redis 통합 테스트) |
 
 ## 이 프로젝트에서 증명하는 것
 
