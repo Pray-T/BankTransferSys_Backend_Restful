@@ -7,14 +7,7 @@
 <br>
 <br>
 이 프로젝트는 은행 이체 REST API를 통해 **MySQL 동시성 정합성**과 **Redis 멱등성/스로틀**을 중심으로 구현했으며, 대량 데이터 **인덱스 조회**도 함께 실험했습니다.
-## 이 프로젝트에서 증명하는 것
 
-- `SELECT ... FOR UPDATE` + **계좌번호 정렬 잠금**으로 교차 이체 데드락 방지
-- Redis **Idempotency-Key** / **쿨다운 키**로 중복·연속 이체 요청 차단
-- MySQL **Serializable 세션 실험**에서 락 대기 타임아웃을 확인한 뒤, **REPEATABLE READ + 비관적 잠금**으로 전환한 근거 문서화
-- `@Version` 낙관적 잠금을 비관적 잠금의 **추가 안전망**으로 배치 (정상 이체 경로에서는 거의 발동하지 않음)
-- 이체 성공 확정(Redis `COMPLETED`/쿨다운)을 **트랜잭션 커밋 이후(afterCommit)** 로 반영해 "DB 미커밋 + Redis 완료" 상태 불일치 방지
-- (보조) 약 200만 건 고객 데이터로 **복합 인덱스** 조회 실험
 
 ## 기술 스택
 
@@ -27,6 +20,15 @@
 | Cache | Redis (멱등성키 / 쿨다운키) |
 | API Docs | springdoc-openapi 2.6.0 (Swagger UI) |
 | Test | JUnit 5 (로컬 MySQL / Redis 통합 테스트) |
+
+## 이 프로젝트에서 증명하는 것
+
+- `SELECT ... FOR UPDATE` + **계좌번호 정렬 잠금**으로 교차 이체 데드락 방지
+- Redis **Idempotency-Key** / **쿨다운 키**로 중복·연속 이체 요청 차단
+- MySQL **Serializable 세션 실험**에서 락 대기 타임아웃을 확인한 뒤, **REPEATABLE READ + 비관적 잠금**으로 전환한 근거 문서화
+- `@Version` 낙관적 잠금을 비관적 잠금의 **추가 안전망**으로 배치 (정상 이체 경로에서는 거의 발동하지 않음)
+- 이체 성공 확정(Redis `COMPLETED`/쿨다운)을 **트랜잭션 커밋 이후(afterCommit)** 로 반영해 "DB 미커밋 + Redis 완료" 상태 불일치 방지
+- 약 200만 건 고객 데이터로 **복합 인덱스** 조회 실험
 
 ## 프로젝트 구조
 
