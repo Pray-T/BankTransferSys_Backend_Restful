@@ -33,7 +33,7 @@
 ## 프로젝트 구조
 
 ```
-BankTranferSys_Backend_Restful/
+BankTransferSys_Backend_Restful/
 ├── build.gradle
 ├── settings.gradle
 ├── gradlew / gradlew.bat
