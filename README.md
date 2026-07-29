@@ -6,7 +6,7 @@
 저는 팀의 일원으로서 팀원들과 함께 좋은 에너지를 만들며 일하고 싶고, 동시에 혼자 고민하는 시간을 통해 전문가로서의 역량을 기르고자 하고 적은 비용으로 어떻게 하면 많은 효과를 누릴 수 있을까? 하고 생각하는 개발자입니다.
 <br>
 <br>
-이 저장소는 은행 이체 REST API를 통해 은행 이체 REST API — **MySQL 동시성 정합성**과 **Redis 멱등성/스로틀**을 중심으로 구현한 백엔드 포트폴리오입니다.
+이 저장소는 은행 이체 REST API를 **MySQL 동시성 정합성**과 **Redis 멱등성/스로틀**을 중심으로 구현한 백엔드 포트폴리오입니다.
 ## 이 프로젝트에서 증명하는 것
 
 - `SELECT ... FOR UPDATE` + **계좌번호 정렬 잠금**으로 교차 이체 데드락 방지
@@ -26,6 +26,7 @@
 | Database | MySQL 8 |
 | Cache | Redis (멱등성키 / 쿨다운키) |
 | API Docs | springdoc-openapi 2.6.0 (Swagger UI) |
+| Test | JUnit 5 (로컬 MySQL / Redis 통합 테스트) |
 
 ## 프로젝트 구조
 
@@ -55,7 +56,7 @@ src/test/
 ├── java/com/banktransfer/
 │   ├── TransferConcurrencyIT.java      # 동시성 정합성 통합 테스트
 │   ├── TransferIdempotencyIT.java      # 멱등성/쿨다운 통합 테스트
-│   └── support/AbstractContainerIT.java # Testcontainers(MySQL/Redis) 기반 클래스
+│   └── support/AbstractContainerIT.java # 로컬 MySQL/Redis 통합 테스트 기반 클래스
 └── resources/
     └── application-test.properties
 ```
@@ -65,8 +66,12 @@ src/test/
 ### 사전 요구사항
 
 - JDK 17+
-- MySQL 8 (기본 DB: `bank_TransferSys`)
-- Redis (기본 포트: 6379)
+- MySQL 8  
+  - 앱 실행: `bank_TransferSys`  
+  - 통합 테스트: `bank_transfer_test` (없으면 JDBC가 생성, 테스트 종료 시 `create-drop`으로 스키마 정리)
+- Redis (기본 포트: `6379`)  
+  - 앱: DB index `0`  
+  - 통합 테스트: DB index `1` (앱 데이터와 분리)
 
 ### 설정
 
@@ -120,13 +125,27 @@ gradlew.bat bootRun
 
 ## 테스트
 
-Testcontainers(MySQL 8 + Redis 7) 기반 통합 테스트로 동시성·멱등성을 검증합니다. **Docker가 필요합니다.**
+로컬에서 실행 중인 MySQL·Redis에 연결해 동시성·멱등성 통합 테스트를 검증합니다. (Docker / Testcontainers 불필요)
+
+| 구분 | 앱 (`bootRun`) | 테스트 (`test`) |
+|------|-----------------|-----------------|
+| MySQL DB | `bank_TransferSys` | `bank_transfer_test` |
+| Redis DB index | `0` | `1` |
+| 스키마 | `ddl-auto=update` (dev) | `ddl-auto=create-drop` |
+
+`DB_USERNAME` / `DB_PASSWORD`는 앱 실행과 동일하게 환경 변수로 주입합니다.
+
+```powershell
+# Windows (PowerShell)
+$env:DB_USERNAME='your_mysql_user'
+$env:DB_PASSWORD='your_mysql_password'
+.\gradlew.bat test
+```
 
 ```bash
-# Windows
-gradlew.bat test
-
 # macOS / Linux
+export DB_USERNAME='your_mysql_user'
+export DB_PASSWORD='your_mysql_password'
 ./gradlew test
 ```
 
@@ -134,8 +153,6 @@ gradlew.bat test
 |--------------|----------|
 | `TransferConcurrencyIT` | 동일 출금 계좌 동시 이체 잔액 정합성, 교차 이체(A↔B) 데드락 부재 |
 | `TransferIdempotencyIT` | 동일 키 재요청/동시 요청 단일 이체, COMPLETED 쿨다운 스킵, 새 키 429, payload 충돌 409 |
-
-Docker가 없으면 `@Testcontainers(disabledWithoutDocker = true)`에 의해 해당 테스트는 스킵됩니다.
 
 ## 아키텍처 다이어그램
 

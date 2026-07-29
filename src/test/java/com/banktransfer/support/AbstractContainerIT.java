@@ -11,13 +11,6 @@ import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.test.context.ActiveProfiles;
-import org.springframework.test.context.DynamicPropertyRegistry;
-import org.springframework.test.context.DynamicPropertySource;
-import org.testcontainers.containers.GenericContainer;
-import org.testcontainers.containers.MySQLContainer;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
-import org.testcontainers.utility.DockerImageName;
 
 import com.banktransfer.dto.TransferRequest;
 import com.banktransfer.dto.TransferResponse;
@@ -26,32 +19,13 @@ import com.banktransfer.model.AccountStatus;
 import com.banktransfer.model.Constants;
 import com.banktransfer.repository.AccountRepository;
 
+/**
+ * 로컬 MySQL / Redis를 사용하는 통합 테스트 기반 클래스.
+ * 접속 정보는 {@code application-test.properties}와 환경 변수 {@code DB_USERNAME}/{@code DB_PASSWORD}를 따른다.
+ */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @ActiveProfiles("test")
-@Testcontainers(disabledWithoutDocker = true)
 public abstract class AbstractContainerIT {
-
-    @Container
-    @SuppressWarnings("resource")
-    static final MySQLContainer<?> MYSQL = new MySQLContainer<>(DockerImageName.parse("mysql:8.0"))
-            .withDatabaseName("bank_transfer_test")
-            .withUsername("test")
-            .withPassword("test");
-
-    @Container
-    @SuppressWarnings("resource")
-    static final GenericContainer<?> REDIS = new GenericContainer<>(DockerImageName.parse("redis:7-alpine"))
-            .withExposedPorts(6379);
-
-    @DynamicPropertySource
-    static void registerProperties(DynamicPropertyRegistry registry) {
-        registry.add("spring.datasource.url", MYSQL::getJdbcUrl);
-        registry.add("spring.datasource.username", MYSQL::getUsername);
-        registry.add("spring.datasource.password", MYSQL::getPassword);
-        registry.add("spring.datasource.driver-class-name", () -> "com.mysql.cj.jdbc.Driver");
-        registry.add("spring.data.redis.host", REDIS::getHost);
-        registry.add("spring.data.redis.port", () -> REDIS.getMappedPort(6379));
-    }
 
     @Autowired
     protected TestRestTemplate restTemplate;
