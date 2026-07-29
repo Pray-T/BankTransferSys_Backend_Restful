@@ -22,14 +22,14 @@ import org.springframework.test.context.TestPropertySource;
 
 import com.banktransfer.dto.TransferResponse;
 import com.banktransfer.repository.TransferRepository;
-import com.banktransfer.support.AbstractContainerIT;
+import com.banktransfer.support.AbstractIntegrationIT;
 
 /**
  * 동시성 정합성 통합 테스트.
  * 쿨다운은 비활성화해 동시 요청이 스로틀에 가로채이지 않도록 한다.
  */
 @TestPropertySource(properties = "app.transfer.cooldown-seconds=0")
-class TransferConcurrencyIT extends AbstractContainerIT {
+class TransferConcurrencyIT extends AbstractIntegrationIT {
 
     @Autowired
     private TransferRepository transferRepository;

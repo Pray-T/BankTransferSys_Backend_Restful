@@ -25,7 +25,7 @@ import com.banktransfer.repository.AccountRepository;
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @ActiveProfiles("test")
-public abstract class AbstractContainerIT {
+public abstract class AbstractIntegrationIT {
 
     @Autowired
     protected TestRestTemplate restTemplate;

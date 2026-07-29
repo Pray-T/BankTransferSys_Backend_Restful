@@ -57,7 +57,7 @@ src/test/
 ├── java/com/banktransfer/
 │   ├── TransferConcurrencyIT.java      # 동시성 정합성 통합 테스트
 │   ├── TransferIdempotencyIT.java      # 멱등성/쿨다운 통합 테스트
-│   └── support/AbstractContainerIT.java # 로컬 MySQL/Redis 통합 테스트 기반 클래스
+│   └── support/AbstractIntegrationIT.java # 로컬 MySQL/Redis 통합 테스트 기반 클래스
 └── resources/
     └── application-test.properties
 ```

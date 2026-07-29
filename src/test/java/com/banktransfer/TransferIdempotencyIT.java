@@ -30,7 +30,7 @@ import com.banktransfer.dto.ErrorResponse;
 import com.banktransfer.dto.TransferRequest;
 import com.banktransfer.dto.TransferResponse;
 import com.banktransfer.repository.TransferRepository;
-import com.banktransfer.support.AbstractContainerIT;
+import com.banktransfer.support.AbstractIntegrationIT;
 
 /**
  * 멱등성·쿨다운 통합 테스트.
@@ -39,7 +39,7 @@ import com.banktransfer.support.AbstractContainerIT;
         "app.idempotency.ttl-seconds=60",
         "app.transfer.cooldown-seconds=10"
 })
-class TransferIdempotencyIT extends AbstractContainerIT {
+class TransferIdempotencyIT extends AbstractIntegrationIT {
 
     @Autowired
     private TransferRepository transferRepository;
