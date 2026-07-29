@@ -19,5 +19,8 @@ Thumbs.db
 # Local Gradle distribution
 gradle-9.2.1/
 
+# Local secrets (copy from .env.example)
+.env
+
 # Logs
 *.log

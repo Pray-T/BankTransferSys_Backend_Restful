@@ -34,6 +34,7 @@
 
 ```
 BankTransferSys_Backend_Restful/
+├── .env.example          # 환경 변수 템플릿 (실제 시크릿은 .env, 커밋 제외)
 ├── build.gradle
 ├── settings.gradle
 ├── gradlew / gradlew.bat
@@ -72,18 +73,30 @@ src/test/
 
 ### 설정
 
-접속 정보는 **환경 변수로 오버라이드**할 수 있으며, 미설정 시 `application-dev.properties`의 로컬 실습용 기본값을 사용합니다.
+DB 계정/비밀번호는 저장소에 넣지 않습니다. `.env.example`을 참고해 로컬에서 환경 변수를 설정하세요.  
+(Spring Boot는 `.env` 파일을 자동으로 읽지 않으므로, 셸 export 또는 IDE Run Configuration에 주입합니다.)
 
-| 환경 변수 | 기본값 | 설명 |
-|-----------|--------|------|
+| 환경 변수 | 기본값 / 필수 | 설명 |
+|-----------|---------------|------|
 | `DB_HOST` / `DB_PORT` / `DB_NAME` | `127.0.0.1` / `3306` / `bank_TransferSys` | MySQL 접속 정보 |
-| `DB_USERNAME` / `DB_PASSWORD` | `your_mysql_username` / `your_mysql_password` | MySQL 계정 |
+| `DB_USERNAME` / `DB_PASSWORD` | **필수** (기본값 없음) | MySQL 계정 |
 | `REDIS_HOST` / `REDIS_PORT` / `REDIS_DATABASE` | `127.0.0.1` / `6379` / `0` | Redis 접속 정보 |
 
 ```bash
-# 환경 변수로 기본값 오버라이드 예시 (macOS / Linux)
+# 1) 예시 파일 확인
+cp .env.example .env   # 값을 채운 뒤 .env는 커밋하지 마세요
+
+# 2) 셸에 환경 변수 주입 후 실행 (macOS / Linux 예시)
+export DB_USERNAME='your_mysql_user'
 export DB_PASSWORD='your_mysql_password'
 ./gradlew bootRun
+```
+
+```powershell
+# Windows PowerShell 예시
+$env:DB_USERNAME='your_mysql_user'
+$env:DB_PASSWORD='your_mysql_password'
+.\gradlew.bat bootRun
 ```
 
 ### 애플리케이션 실행
