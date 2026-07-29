@@ -1,13 +1,12 @@
 # Bank Transfer System Backend (RESTful)
-안녕하세요. 시간을 내어 방문해 주셔서 감사합니다.  
-팀과 시너지를 내면서도, 혼자 깊게 고민하며 성장하는 개발자가 되고자 합니다.  
+**긍정적으로 일하고 세상에 도움이 되는 사람이 되자.**
+<br>
+<br>
+안녕하세요 먼저 귀한 시간을 내어 저의 깃허브에 방문해 주신 것에 감사드립니다.<br/>
+저는 팀의 일원으로서 팀원들과 함께 좋은 에너지를 만들며 일하고 싶고, 동시에 혼자 고민하는 시간을 통해 전문가로서의 역량을 기르고자 하고 적은 비용으로 어떻게 하면 많은 효과를 누릴 수 있을까? 하고 생각하는 개발자입니다.
+<br>
+<br>
 이 저장소는 은행 이체 REST API를 통해 은행 이체 REST API — **MySQL 동시성 정합성**과 **Redis 멱등성/스로틀**을 중심으로 구현한 백엔드 포트폴리오입니다.
-
-## 다른 포트폴리오
-
-- [Cursor Agent로 GitHub Copilot을 저렴하게 사용해보기](https://github.com/Pray-T/GitHub-Copilot-With-Cursor.git)
-- [AWS에 배포·운영한 JWT+Redis 이중 토큰 인증과 실시간 채팅 웹 앱](https://github.com/Pray-T/ReadyPlz-Production_main.git)
-
 ## 이 프로젝트에서 증명하는 것
 
 - `SELECT ... FOR UPDATE` + **계좌번호 정렬 잠금**으로 교차 이체 데드락 방지
@@ -27,8 +26,6 @@
 | Database | MySQL 8 |
 | Cache | Redis (멱등성키 / 쿨다운키) |
 | API Docs | springdoc-openapi 2.6.0 (Swagger UI) |
-| Test | JUnit 5 + Testcontainers (MySQL 8 / Redis 7) |
-| Build | Gradle |
 
 ## 프로젝트 구조
 
@@ -73,8 +70,7 @@ src/test/
 
 ### 설정
 
-DB 계정/비밀번호는 저장소에 넣지 않습니다. `.env.example`을 참고해 로컬에서 환경 변수를 설정하세요.  
-(Spring Boot는 `.env` 파일을 자동으로 읽지 않으므로, 셸 export 또는 IDE Run Configuration에 주입합니다.)
+DB 계정/비밀번호는 저장소에 넣지 않습니다. `.env.example`을 참고해 로컬에서 환경 변수를 설정하세요. (셸 export 또는 IDE Run Configuration에 주입해주세요.)
 
 | 환경 변수 | 기본값 / 필수 | 설명 |
 |-----------|---------------|------|
@@ -373,7 +369,7 @@ Account secondAcc = accountRepository.findByAccountNumberForUpdate(second);
 
 ---
 
-## 인덱스 실험 (보조)
+## 인덱스 실험
 
 이체 정합성과는 별도로, MySQL **복합 인덱스·카디널리티·좌측 접두사**를 확인하기 위한 보조 실험입니다.
 
@@ -422,4 +418,9 @@ WHERE name LIKE 'ql%'
 
 ---
 
-읽어 주셔서 감사합니다.
+## 다른 포트폴리오
+
+- [Cursor Agent로 GitHub Copilot을 저렴하게 사용해보기](https://github.com/Pray-T/GitHub-Copilot-With-Cursor.git)
+- [AWS에 배포·운영한 JWT+Redis 이중 토큰 인증과 실시간 채팅 웹 앱](https://github.com/Pray-T/ReadyPlz-Production_main.git)
+
+**이상입니다, 저의 깃허브 방문을 감사드립니다.**
