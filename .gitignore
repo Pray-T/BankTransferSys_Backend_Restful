@@ -24,3 +24,6 @@ gradle-9.2.1/
 
 # Logs
 *.log
+
+# Personal study notes (local only — do not publish)
+강의/
