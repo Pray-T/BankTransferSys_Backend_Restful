@@ -18,6 +18,7 @@
   - [설정](#설정)
   - [애플리케이션 실행](#애플리케이션-실행)
 - [API 목록](#api-목록)
+  - [빠른 체험 (curl 예시)](#빠른-체험-curl-예시)
 - [테스트](#테스트)
 - [아키텍처 다이어그램](#아키텍처-다이어그램)
   - [시스템 구성도](#1-시스템-구성도)
@@ -147,6 +148,45 @@ gradlew.bat bootRun
 | GET | `/api/transfers/{id}` | 이체 조회 |
 | GET | `/api/accounts/{accountNumber}` | 계좌번호로 계좌 조회 |
 | POST | `/api/dev/generate-accounts` | dev profile 전용 — 더미 고객·계좌 약 200만 건 생성 |
+
+### 빠른 체험 (curl 예시)
+
+앱이 `8080`에서 실행 중이고, 출금/입금 계좌가 DB에 이미 있어야 합니다. (Windows는 `curl` 대신 `curl.exe`를 권장합니다.)
+
+**1) 이체 생성** — `POST /api/transfers`
+
+```bash
+curl -i -X POST "http://localhost:8080/api/transfers" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: demo-key-001" \
+  -d "{\"sourceAccountNumber\":\"1000000001\",\"targetAccountNumber\":\"1000000002\",\"amount\":1000}"
+```
+
+성공 시 응답 예시 (`201 Created`, 응답 헤더에 `Idempotency-Key: demo-key-001`):
+
+```json
+{
+  "transferId": 1,
+  "status": "COMPLETED",
+  "executedAt": "2026-07-29T18:30:00",
+  "sourceAccountNumber": "1000000001",
+  "targetAccountNumber": "1000000002",
+  "amount": 1000,
+  "currencyCode": "KRW",
+  "sourceBalanceAfter": 99000,
+  "targetBalanceAfter": 11000
+}
+```
+
+동일 `Idempotency-Key`로 다시 호출하면 이중 이체 없이 **이전 결과**를 `201`으로 반환합니다.
+
+**2) 이체 조회** — `GET /api/transfers/{id}`
+
+```bash
+curl -i "http://localhost:8080/api/transfers/1"
+```
+
+응답 본문 필드는 위 `TransferResponse`와 동일합니다 (`200 OK`).
 
 ## 테스트
 
