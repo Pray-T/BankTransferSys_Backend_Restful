@@ -463,7 +463,7 @@ Account secondAcc = accountRepository.findByAccountNumberForUpdate(second);
 1. 애플리케이션을 dev profile로 실행합니다.
 2. `POST /api/dev/generate-accounts`로 `customers`에 약 200만 건을 생성합니다.
 3. 복합 인덱스가 DDL에 반영되었는지 확인합니다.
-4. 아래 쿼리로 `EXPLAIN`과 실행 시간을 비교합니다. (가능하면 **버퍼 풀 cold/warm**, **동일 쿼리 반복**을 구분해 측정하세요.)
+4. 아래 쿼리로 `EXPLAIN`과 실행 시간을 비교합니다.
 
 ```sql
 EXPLAIN
