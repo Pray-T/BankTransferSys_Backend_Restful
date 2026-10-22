@@ -160,7 +160,7 @@ curl -i -X POST "http://localhost:8080/api/transfers" \
 
 금액은 원화 정수입니다. 원화에는 소수 단위가 없으므로 `double`/`float`를 쓰지 않고, `accounts.balance`, `transfers.amount`, `account_transactions.amount`, `account_transactions.balance_after`는 `DECIMAL(19,0)`입니다. 이체 금액은 1원 이상, 정수 15자리(`999999999999999`원) 이하이며, 소수이거나 자릿수를 넘으면 `400 VALIDATION_ERROR`입니다. 생성·같은 키 재응답·조회의 금액은 소수 없는 같은 정수로 나갑니다.
 
-`Idempotency-Key`는 필수입니다. 헤더를 빼거나 공백만 보내면 `400 VALIDATION_ERROR`이고, 서버는 UUID를 만들지 않습니다. 키는 최대 128자이며 앞뒤 공백은 제거합니다.
+`Idempotency-Key`는 필수입니다. 헤더를 빼거나 공백만 보내면 `400 VALIDATION_ERROR`이고, 서버는 UUID를 만들지 않습니다. 키는 최대 128자이며 앞뒤 공백은 제거합니다. ASCII가 아닌 문자는 `400 VALIDATION_ERROR`입니다.
 
 같은 키와 같은 본문(출금 계좌, 입금 계좌, 금액)으로 다시 호출하면 이중 이체 없이 **처음 이체의 `transferId`**를 `201`으로 반환합니다. 같은 키와 다른 본문은 `409 Conflict`이며 두 번째 이체를 만들지 않습니다.
 
@@ -190,6 +190,12 @@ curl -i "http://localhost:8080/api/transfers/1"
 ALTER TABLE accounts MODIFY balance DECIMAL(19,0) NOT NULL; ALTER TABLE transfers MODIFY amount DECIMAL(19,0) NOT NULL; ALTER TABLE account_transactions MODIFY amount DECIMAL(19,0) NOT NULL, MODIFY balance_after DECIMAL(19,0) NOT NULL;
 ```
 
+`ddl-auto=update`는 이미 있는 컬럼의 collation도 바꾸지 않습니다. 개발 DB의 `transfer_idempotency.idempotency_key`가 기본 collation이면 아래를 한 번 실행합니다. 테스트 DB는 `create-drop`이라 이 구문이 필요 없습니다.
+
+```sql
+ALTER TABLE transfer_idempotency MODIFY idempotency_key VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin NOT NULL;
+```
+
 `DB_USERNAME` / `DB_PASSWORD`는 앱 실행과 동일하게 환경 변수로 주입합니다.
 
 ```powershell
@@ -210,7 +216,7 @@ export DB_PASSWORD='your_mysql_password'
 |--------------|----------|
 | `TransferConcurrencyIT` | 동일 출금 계좌 동시 이체 잔액 정합성, 교차 이체(A↔B) 데드락 부재 |
 | `MoneyUtilTest` | 정상 정수, 소수·음수·0·지수 표기·자릿수 초과 거절, 응답·해시용 scale 0 |
-| `TransferIdempotencyIT` | 키 생략·공백 400, 동일 키 재요청/동시 요청 단일 이체, 완료 재조회는 쿨다운 스킵, 새 키 429, payload 충돌 409, 커밋 전 실패 후 같은 키 재사용, 소수·비정상 금액 400, 생성·재응답·조회의 금액 문자열이 같음 |
+| `TransferIdempotencyIT` | 키 생략·공백·ASCII 아님 400, 동일 키 재요청/동시 요청 단일 이체, 대소문자만 다른 키는 별개 이체, 완료 재조회는 쿨다운 스킵, 새 키 429, payload 충돌 409, 커밋 전 실패 후 같은 키 재사용, 소수·비정상 금액 400, 생성·재응답·조회의 금액 문자열이 같음 |
 | `TransferCommitCacheFailureIT` | 커밋 후 쿨다운 기록 실패에도 201, 같은 키 재요청은 같은 transferId이며 잔액은 다시 움직이지 않음 |
 
 ## 아키텍처 다이어그램
@@ -380,17 +386,20 @@ MySQL InnoDB 기본 격리 수준인 **REPEATABLE READ**를 유지하고, 이체
 
 재조회의 원본은 MySQL `transfer_idempotency`입니다. 이체와 **같은 트랜잭션**에 INSERT하고, 성공 시 그 행을 `SUCCESS`로 바꾸며 `transfer_id`를 연결합니다. `REQUIRES_NEW`로 따로 커밋하지 않습니다. 롤백되면 이체와 멱등성 행이 함께 사라져 같은 키를 다시 쓸 수 있습니다. 실패 상태를 별도 트랜잭션에 남기지 않습니다.
 
+키는 대소문자를 구분합니다. MySQL 기본 collation은 대소문자를 같은 문자로 보므로, `idempotency_key`에는 바이너리 collation(`ascii` / `ascii_bin`)을 씁니다.
+
 같은 본문 여부는 출금 계좌, 입금 계좌, 금액의 안정적인 해시로 판단합니다. 금액은 소수 없는 정수 평문(예: `1000`)으로 넣습니다.
 
 | 상태 | 응답 |
 |------|------|
 | 헤더 생략·공백 | `400` — 이체 행 없음. 서버는 UUID를 만들지 않음 |
+| ASCII가 아닌 키 | `400 VALIDATION_ERROR` — 이체 행 없음 |
 | 같은 키 + 같은 본문 (`SUCCESS`) | `201 Created` — 원래 `transferId` (**쿨다운 검사 전**) |
 | 같은 키 + 다른 본문 | `409 Conflict` — 추가 이체 없음 |
 | 커밋 전 실패 (잔액 부족, 검증, 없음 등) | 해당 비즈니스 오류. 멱등성 행도 롤백되어 같은 키 재사용 가능 |
 | 같은 키 동시 요청 | 유니크 인덱스에서 대기한 뒤 커밋된 행을 재조회. 이체는 하나 |
 
-- 유니크 인덱스: `transfer_idempotency.uk_transfer_idempotency_key` (`idempotency_key`)
+- 유니크 인덱스: `transfer_idempotency.uk_transfer_idempotency_key` (`idempotency_key`, `ascii_bin`)
 - MySQL `SUCCESS` 행은 TTL로 지우지 않습니다. 지우면 같은 키로 다시 출금할 수 있습니다.
 - Redis 캐시 키: `idempo:TRANSFER:{Idempotency-Key}` (요청 경로에서 재조회하지 않음)
 - Redis TTL: **24시간(86400s)** — 캐시에만 적용

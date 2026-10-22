@@ -256,7 +256,21 @@ public class TransferService {
                     AppErrorCode.VALIDATION_ERROR,
                     "Idempotency-Key는 " + Constants.MAX_IDEMPOTENCY_KEY_LENGTH + "자를 초과할 수 없습니다.");
         }
+        if (!isAscii(key)) {
+            throw new BusinessException(
+                    AppErrorCode.VALIDATION_ERROR,
+                    "Idempotency-Key는 ASCII 문자만 사용할 수 있습니다.");
+        }
         return key;
+    }
+
+    private static boolean isAscii(String value) {
+        for (int i = 0; i < value.length(); i++) {
+            if (value.charAt(i) > 0x7F) {
+                return false;
+            }
+        }
+        return true;
     }
 
     @Transactional(readOnly = true)

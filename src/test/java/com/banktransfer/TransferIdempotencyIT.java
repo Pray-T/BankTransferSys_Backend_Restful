@@ -24,6 +24,7 @@ import javax.sql.DataSource;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
@@ -64,6 +65,9 @@ class TransferIdempotencyIT extends AbstractIntegrationIT {
     @Autowired
     private DataSource dataSource;
 
+    @Autowired
+    private StringRedisTemplate stringRedisTemplate;
+
     @Test
     @DisplayName("동일 Idempotency-Key 재요청은 이전 결과를 반환하고 이중 이체하지 않는다")
     void sameKeyReplay_returnsPreviousResultWithoutDoubleTransfer() {
@@ -94,6 +98,47 @@ class TransferIdempotencyIT extends AbstractIntegrationIT {
         assertThat(transferIdempotencyRepository.findByIdempotencyKey(key)).get()
                 .extracting(row -> row.getStatus(), row -> row.getTransfer().getId())
                 .containsExactly(TransferIdempotencyStatus.SUCCESS, transferId);
+    }
+
+    @Test
+    @DisplayName("대소문자만 다른 Idempotency-Key는 재조회가 아니라 서로 다른 이체다")
+    void differentCaseKeys_createDistinctTransfers() throws Exception {
+        assertIdempotencyKeyCollation();
+
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String source = "SRC-CS-" + suffix;
+        String target = "TGT-CS-" + suffix;
+        seedAccount(source, new BigDecimal("100000"));
+        seedAccount(target, BigDecimal.ZERO);
+
+        String upperKey = "AbC-" + suffix;
+        String lowerKey = "abc-" + suffix;
+        BigDecimal amount = new BigDecimal("1000");
+
+        ResponseEntity<TransferResponse> first = postTransfer(source, target, amount, upperKey);
+        assertThat(first.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        assertThat(first.getBody()).isNotNull();
+        assertThat(first.getHeaders().getFirst("Idempotency-Key")).isEqualTo(upperKey);
+
+        stringRedisTemplate.delete("trans:cooldown:" + source + "->" + target);
+
+        ResponseEntity<TransferResponse> second = postTransfer(source, target, amount, lowerKey);
+        assertThat(second.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        assertThat(second.getBody()).isNotNull();
+        assertThat(second.getBody().getTransferId()).isNotEqualTo(first.getBody().getTransferId());
+        assertThat(second.getHeaders().getFirst("Idempotency-Key")).isEqualTo(lowerKey);
+
+        assertThat(countCompletedTransfers(source, target)).isEqualTo(2);
+        assertThat(accountRepository.findByAccountNumber(source).orElseThrow().getBalance())
+                .isEqualByComparingTo(new BigDecimal("98000"));
+        assertThat(accountRepository.findByAccountNumber(target).orElseThrow().getBalance())
+                .isEqualByComparingTo(new BigDecimal("2000"));
+        assertThat(transferIdempotencyRepository.findByIdempotencyKey(upperKey)).get()
+                .extracting(row -> row.getStatus(), row -> row.getTransfer().getId())
+                .containsExactly(TransferIdempotencyStatus.SUCCESS, first.getBody().getTransferId());
+        assertThat(transferIdempotencyRepository.findByIdempotencyKey(lowerKey)).get()
+                .extracting(row -> row.getStatus(), row -> row.getTransfer().getId())
+                .containsExactly(TransferIdempotencyStatus.SUCCESS, second.getBody().getTransferId());
     }
 
     @Test
@@ -192,6 +237,27 @@ class TransferIdempotencyIT extends AbstractIntegrationIT {
         assertThat(blank.getHeaders().getFirst("Idempotency-Key")).isNull();
 
         assertThat(transferRepository.countByAccountNumbers(source, target)).isZero();
+    }
+
+    @Test
+    @DisplayName("ASCII가 아닌 Idempotency-Key는 400이고 이체 행을 만들지 않는다")
+    void nonAsciiKey_isRejectedWithoutTransfer() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String source = "SRC-NA-" + suffix;
+        String target = "TGT-NA-" + suffix;
+        seedAccount(source, new BigDecimal("100000"));
+        seedAccount(target, BigDecimal.ZERO);
+
+        String key = "abc-\u00e9-" + suffix;
+        ResponseEntity<ErrorResponse> rejected = postTransferError(source, target, new BigDecimal("1000"), key);
+        assertThat(rejected.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(rejected.getBody()).isNotNull();
+        assertThat(rejected.getBody().getCode()).isEqualTo("VALIDATION_ERROR");
+        assertThat(rejected.getBody().getMessage()).contains("ASCII");
+        // ascii 컬럼과 비ASCII 비교는 collation 오류가 나므로, 이체 행이 없는지로 확인한다.
+        assertThat(transferRepository.countByAccountNumbers(source, target)).isZero();
+        assertThat(accountRepository.findByAccountNumber(source).orElseThrow().getBalance())
+                .isEqualByComparingTo(new BigDecimal("100000"));
     }
 
     @Test
@@ -372,6 +438,36 @@ class TransferIdempotencyIT extends AbstractIntegrationIT {
             assertDecimal19Scale0(connection, "transfers", "amount");
             assertDecimal19Scale0(connection, "account_transactions", "amount");
             assertDecimal19Scale0(connection, "account_transactions", "balance_after");
+        }
+    }
+
+    private void assertIdempotencyKeyCollation() throws Exception {
+        try (Connection connection = dataSource.getConnection()) {
+            assertThat(connection.getCatalog()).isEqualTo("bank_transfer_test");
+            assertThat(connection.getCatalog()).isNotEqualToIgnoringCase("bank_TransferSys");
+            try (PreparedStatement statement = connection.prepareStatement(
+                    "SELECT COLUMN_TYPE, CHARACTER_SET_NAME, COLLATION_NAME, CHARACTER_MAXIMUM_LENGTH "
+                            + "FROM information_schema.COLUMNS "
+                            + "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'transfer_idempotency' "
+                            + "AND COLUMN_NAME = 'idempotency_key'")) {
+                try (ResultSet rows = statement.executeQuery()) {
+                    assertThat(rows.next()).isTrue();
+                    assertThat(rows.getString("COLUMN_TYPE")).startsWith("varchar(128)");
+                    assertThat(rows.getString("CHARACTER_SET_NAME")).isEqualToIgnoringCase("ascii");
+                    assertThat(rows.getString("COLLATION_NAME")).isEqualToIgnoringCase("ascii_bin");
+                    assertThat(rows.getInt("CHARACTER_MAXIMUM_LENGTH")).isEqualTo(128);
+                }
+            }
+            try (PreparedStatement statement = connection.prepareStatement(
+                    "SELECT NON_UNIQUE FROM information_schema.STATISTICS "
+                            + "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'transfer_idempotency' "
+                            + "AND INDEX_NAME = 'uk_transfer_idempotency_key' "
+                            + "AND COLUMN_NAME = 'idempotency_key'")) {
+                try (ResultSet rows = statement.executeQuery()) {
+                    assertThat(rows.next()).isTrue();
+                    assertThat(rows.getInt("NON_UNIQUE")).isZero();
+                }
+            }
         }
     }
 

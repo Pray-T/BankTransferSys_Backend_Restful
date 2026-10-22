@@ -39,7 +39,16 @@ public class TransferIdempotency extends BaseTimeEntity {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @Column(name = "idempotency_key", nullable = false, length = Constants.MAX_IDEMPOTENCY_KEY_LENGTH)
+    /**
+     * 대소문자를 구분한다. 바이너리 collation이 없으면 {@code AbC}와 {@code abc}가 같은 키가 된다.
+     * {@code ddl-auto=update}는 이미 있는 컬럼의 collation을 바꾸지 않는다.
+     */
+    @Column(
+            name = "idempotency_key",
+            nullable = false,
+            length = Constants.MAX_IDEMPOTENCY_KEY_LENGTH,
+            columnDefinition = "VARCHAR(" + Constants.MAX_IDEMPOTENCY_KEY_LENGTH
+                    + ") CHARACTER SET ascii COLLATE ascii_bin")
     private String idempotencyKey;
 
     @Column(name = "request_hash", nullable = false, length = 64)
