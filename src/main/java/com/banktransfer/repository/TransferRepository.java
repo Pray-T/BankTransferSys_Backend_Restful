@@ -16,12 +16,4 @@ public interface TransferRepository extends JpaRepository<Transfer, Long> {
             """)
     long countCompletedByAccountNumbers(@Param("source") String source,
                                         @Param("target") String target);
-
-    @Query("""
-            select count(t) from Transfer t
-            where t.sourceAccount.accountNumber = :source
-              and t.targetAccount.accountNumber = :target
-            """)
-    long countByAccountNumbers(@Param("source") String source,
-                               @Param("target") String target);
 }

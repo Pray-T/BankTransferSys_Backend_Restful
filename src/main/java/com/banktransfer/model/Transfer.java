@@ -11,7 +11,6 @@ import jakarta.persistence.FetchType;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
-import jakarta.persistence.Index;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.ManyToOne;
 import jakarta.persistence.Table;
@@ -26,12 +25,7 @@ import lombok.Setter;
 @Getter
 @NoArgsConstructor(access = AccessLevel.PROTECTED)
 @Entity
-@Table(
-        name = "transfers",
-        indexes = {
-                @Index(name = "idx_transfer_created_at", columnList = "created_at") //최신순 조회가 많기에 created_at 인덱스 추가
-        }
-)
+@Table(name = "transfers")
 public class Transfer extends BaseTimeEntity {
 
     @Id

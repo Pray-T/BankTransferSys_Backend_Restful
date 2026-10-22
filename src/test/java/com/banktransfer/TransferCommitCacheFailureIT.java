@@ -19,7 +19,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 
 import com.banktransfer.dto.TransferResponse;
-import com.banktransfer.repository.TransferRepository;
+import com.banktransfer.repository.TransferCountTestRepository;
 import com.banktransfer.service.IdempotencyService;
 import com.banktransfer.service.TransferThrottleService;
 import com.banktransfer.support.AbstractIntegrationIT;
@@ -37,7 +37,7 @@ class TransferCommitCacheFailureIT extends AbstractIntegrationIT {
     private TransferThrottleService transferThrottleService;
 
     @Autowired
-    private TransferRepository transferRepository;
+    private TransferCountTestRepository transferCountTestRepository;
 
     @Test
     @DisplayName("커밋 후 멱등성 캐시 기록 실패에도 201이고 같은 키 재요청은 돈을 다시 움직이지 않는다")
@@ -62,14 +62,14 @@ class TransferCommitCacheFailureIT extends AbstractIntegrationIT {
         verify(transferThrottleService).acquire(source, target);
         verify(transferThrottleService, never()).releaseIfOwned(anyString(), anyString(), anyString());
 
-        assertThat(transferRepository.countByAccountNumbers(source, target)).isEqualTo(1);
+        assertThat(transferCountTestRepository.countByAccountNumbers(source, target)).isEqualTo(1);
         assertThat(accountRepository.findByAccountNumber(source).orElseThrow().getBalance())
                 .isEqualByComparingTo(new BigDecimal("99000"));
 
         ResponseEntity<TransferResponse> replay = postTransfer(source, target, amount, key);
         assertThat(replay.getStatusCode()).isEqualTo(HttpStatus.CREATED);
         assertThat(replay.getBody().getTransferId()).isEqualTo(transferId);
-        assertThat(transferRepository.countByAccountNumbers(source, target)).isEqualTo(1);
+        assertThat(transferCountTestRepository.countByAccountNumbers(source, target)).isEqualTo(1);
         assertThat(accountRepository.findByAccountNumber(source).orElseThrow().getBalance())
                 .isEqualByComparingTo(new BigDecimal("99000"));
         assertThat(accountRepository.findByAccountNumber(target).orElseThrow().getBalance())
@@ -96,7 +96,7 @@ class TransferCommitCacheFailureIT extends AbstractIntegrationIT {
         assertThat(response.getBody()).contains("INTERNAL_ERROR");
         verify(transferThrottleService).acquire(source, target);
         verify(idempotencyService, never()).cacheSuccess(anyString(), anyString(), anyLong());
-        assertThat(transferRepository.countByAccountNumbers(source, target)).isZero();
+        assertThat(transferCountTestRepository.countByAccountNumbers(source, target)).isZero();
         assertThat(accountRepository.findByAccountNumber(source).orElseThrow().getBalance())
                 .isEqualByComparingTo(new BigDecimal("100000"));
         assertThat(accountRepository.findByAccountNumber(target).orElseThrow().getBalance())

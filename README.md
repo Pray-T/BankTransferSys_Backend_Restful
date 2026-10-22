@@ -202,6 +202,14 @@ ALTER TABLE transfer_idempotency MODIFY idempotency_key VARCHAR(128) CHARACTER S
 ALTER TABLE account_transactions DROP INDEX idx_account_tx_transfer, ADD UNIQUE INDEX uk_account_tx_transfer_type (transfer_id, type);
 ```
 
+`ddl-auto=update`는 엔티티에서 뺀 보조 인덱스도 지우지 않습니다. 개발 DB에 남아 있으면 해당 인덱스만 한 번 지웁니다. 테스트 DB는 `create-drop`이라 이 구문이 필요 없습니다.
+
+```sql
+ALTER TABLE accounts DROP INDEX idx_account_balance;
+ALTER TABLE transfers DROP INDEX idx_transfer_created_at;
+ALTER TABLE account_transactions DROP INDEX idx_account_tx_account;
+```
+
 `DB_USERNAME` / `DB_PASSWORD`는 앱 실행과 동일하게 환경 변수로 주입합니다.
 
 ```powershell
@@ -475,7 +483,8 @@ Account secondAcc = accountRepository.findByAccountNumberForUpdate(second);
 이체 정합성과는 별도로, MySQL **복합 인덱스·카디널리티·좌측 접두사**를 확인하기 위한 보조 실험입니다.
 
 - **인덱스:** `idx_customer_name_combined (name, bank, gender)` — 카디널리티가 높은 `name`을 앞에 배치
-- **조회 조건:** `name LIKE 'ql%'` + `bank = 'WOORI'` + `gender = 'MALE'` (B-Tree 좌측 접두사에 맞춘 조건)
+- **애플리케이션 조회:** `CustomerRepository.findByNameAndBank`, `existsByNameAndBank` (`name`, `bank` 동등 조건. 좌측 접두사 `name, bank`를 사용)
+- **수동 실험 조건:** `name LIKE 'ql%'` + `bank = 'WOORI'` + `gender = 'MALE'` (아래 SQL은 API가 아니라, 같은 인덱스를 MySQL에서 직접 확인하는 실험)
 
 ### 재현 방법
 
@@ -494,17 +503,16 @@ WHERE name LIKE 'ql%'
 
 ### 프로젝트에 정의된 주요 인덱스
 
-| 테이블 | 인덱스명 | 컬럼 | 용도 |
-|--------|---------|------|------|
-| `customers` | `idx_customer_name_combined` | name, bank, gender | 인덱스 성능 실험 |
-| `accounts` | `idx_account_balance` | balance | 잔액 조건 조회 |
-| `accounts` | `uq_account_number` | account_number (UNIQUE) | 계좌번호 유일성 |
-| `transfers` | `idx_transfer_created_at` | created_at | 최신 이체 내역 조회 |
-| `transfer_idempotency` | `uk_transfer_idempotency_key` | idempotency_key (UNIQUE) | 멱등성 키 재조회·동시 중복 차단 |
-| `account_transactions` | `idx_account_tx_account` | account_id | 계좌별 거래내역 조회 |
-| `account_transactions` | `uk_account_tx_transfer_type` | transfer_id, type (UNIQUE) | 이체·유형당 원장 1건. 선행 컬럼 `transfer_id`로 이체별 조회도 커버 |
+| 테이블 | 인덱스명 | 컬럼 | 프로덕션 조회 |
+|--------|---------|------|----------------|
+| `customers` | `idx_customer_name_combined` | name, bank, gender | `CustomerRepository.findByNameAndBank`, `existsByNameAndBank` (`name`, `bank` 좌측 접두사) |
+| `accounts` | `uq_account_number` | account_number (UNIQUE) | `AccountRepository.findByAccountNumber`, `findByAccountNumberForUpdate` (비관적 잠금). `TransferRepository.countCompletedByAccountNumbers`의 계좌번호 조건 |
+| `transfer_idempotency` | `uk_transfer_idempotency_key` | idempotency_key (UNIQUE) | `TransferIdempotencyRepository.findByIdempotencyKey`. 같은 키 동시 삽입 차단 |
+| `account_transactions` | `uk_account_tx_transfer_type` | transfer_id, type (UNIQUE) | 이체·유형당 원장 1건. `AccountTransactionRepository.findByTransferIdAndType` |
 
-`balance_after`는 이체 시점 잔액의 근거입니다. 재응답과 조회는 계좌의 현재 잔액 대신 이 값을 읽습니다. `transfer_id`만 있던 `idx_account_tx_transfer`는 유니크 인덱스의 왼쪽 컬럼과 겹쳐 제거했습니다. `idx_account_tx_account`는 유니크 키에 없는 컬럼이라 그대로 둡니다.
+`balance_after`는 이체 시점 잔액의 근거입니다. 재응답과 단건 조회는 계좌의 현재 잔액 대신 이 값을 읽으며, `findByTransferIdAndType`이 `(transfer_id, type)` 유니크 인덱스를 사용합니다. `transfer_id`만 있던 `idx_account_tx_transfer`는 그 왼쪽 컬럼과 겹쳐 제거했습니다.
+
+계좌로 원장을 거르는 프로덕션 조회가 없어서 `idx_account_tx_account`(`account_id`)는 제거했습니다. 이체 목록을 `created_at`으로 조회하는 쿼리가 없어서 `idx_transfer_created_at`도 제거했습니다. 잔액 조건 조회가 없어서 `idx_account_balance`도 제거했습니다. `transfers`의 단건 조회는 기본 키(`TransferRepository.findById`)를 사용합니다.
 
 ### 측정 결과 (참고)
 

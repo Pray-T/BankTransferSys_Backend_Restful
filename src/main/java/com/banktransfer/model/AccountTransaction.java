@@ -10,7 +10,6 @@ import jakarta.persistence.FetchType;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
-import jakarta.persistence.Index;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.ManyToOne;
 import jakarta.persistence.Table;
@@ -26,7 +25,7 @@ import lombok.NoArgsConstructor;
  * 한 이체의 출금·입금은 유형별로 한 행이다.
  * {@code (transfer_id, type)} 유니크의 선행 컬럼이 {@code transfer_id}라서
  * {@code transfer_id}만 보던 인덱스는 두지 않는다.
- * 계좌별 조회용 {@code idx_account_tx_account}는 유니크 키에 없는 컬럼이라 유지한다.
+ * 계좌 아이디로 원장을 조회하는 프로덕션 쿼리가 없어 {@code account_id} 인덱스는 두지 않는다.
  */
 @Getter
 @NoArgsConstructor(access = AccessLevel.PROTECTED)
@@ -37,9 +36,6 @@ import lombok.NoArgsConstructor;
                 @UniqueConstraint(
                         name = AccountTransaction.UNIQUE_TRANSFER_TYPE,
                         columnNames = {"transfer_id", "type"})
-        },
-        indexes = {
-                @Index(name = "idx_account_tx_account", columnList = "account_id")
         }
 )
 public class AccountTransaction extends BaseTimeEntity {

@@ -49,6 +49,7 @@ import com.banktransfer.model.TransactionType;
 import com.banktransfer.model.Transfer;
 import com.banktransfer.model.TransferIdempotencyStatus;
 import com.banktransfer.repository.AccountTransactionRepository;
+import com.banktransfer.repository.TransferCountTestRepository;
 import com.banktransfer.repository.TransferIdempotencyRepository;
 import com.banktransfer.repository.TransferRepository;
 import com.banktransfer.support.AbstractIntegrationIT;
@@ -64,6 +65,9 @@ class TransferIdempotencyIT extends AbstractIntegrationIT {
 
     @Autowired
     private TransferRepository transferRepository;
+
+    @Autowired
+    private TransferCountTestRepository transferCountTestRepository;
 
     @Autowired
     private TransferIdempotencyRepository transferIdempotencyRepository;
@@ -246,7 +250,7 @@ class TransferIdempotencyIT extends AbstractIntegrationIT {
         assertThat(created.get()).isEqualTo(1);
         assertThat(cooledDown.get()).isEqualTo(threads - 1);
         assertThat(countCompletedTransfers(source, target)).isEqualTo(completedBefore + 1);
-        assertThat(transferRepository.countByAccountNumbers(source, target)).isEqualTo(completedBefore + 1);
+        assertThat(transferCountTestRepository.countByAccountNumbers(source, target)).isEqualTo(completedBefore + 1);
         assertThat(accountRepository.findByAccountNumber(source).orElseThrow().getBalance())
                 .isEqualByComparingTo(new BigDecimal("99000"));
         assertThat(accountRepository.findByAccountNumber(target).orElseThrow().getBalance())
@@ -290,7 +294,7 @@ class TransferIdempotencyIT extends AbstractIntegrationIT {
 
         assertThat(conflict.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
         assertThat(conflict.getBody().getCode()).isEqualTo("CONFLICT");
-        assertThat(transferRepository.countByAccountNumbers(source, target)).isEqualTo(1);
+        assertThat(transferCountTestRepository.countByAccountNumbers(source, target)).isEqualTo(1);
         assertThat(accountRepository.findByAccountNumber(source).orElseThrow().getBalance())
                 .isEqualByComparingTo(new BigDecimal("99000"));
         assertThat(accountRepository.findByAccountNumber(target).orElseThrow().getBalance())
@@ -316,7 +320,7 @@ class TransferIdempotencyIT extends AbstractIntegrationIT {
         assertThat(blank.getBody().getCode()).isEqualTo("VALIDATION_ERROR");
         assertThat(blank.getHeaders().getFirst("Idempotency-Key")).isNull();
 
-        assertThat(transferRepository.countByAccountNumbers(source, target)).isZero();
+        assertThat(transferCountTestRepository.countByAccountNumbers(source, target)).isZero();
     }
 
     @Test
@@ -335,7 +339,7 @@ class TransferIdempotencyIT extends AbstractIntegrationIT {
         assertThat(rejected.getBody().getCode()).isEqualTo("VALIDATION_ERROR");
         assertThat(rejected.getBody().getMessage()).contains("ASCII");
         // ascii 컬럼과 비ASCII 비교는 collation 오류가 나므로, 이체 행이 없는지로 확인한다.
-        assertThat(transferRepository.countByAccountNumbers(source, target)).isZero();
+        assertThat(transferCountTestRepository.countByAccountNumbers(source, target)).isZero();
         assertThat(accountRepository.findByAccountNumber(source).orElseThrow().getBalance())
                 .isEqualByComparingTo(new BigDecimal("100000"));
     }
@@ -354,7 +358,7 @@ class TransferIdempotencyIT extends AbstractIntegrationIT {
                 postTransferError(source, target, new BigDecimal("1000"), key);
         assertThat(rejected.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
         assertThat(rejected.getBody().getCode()).isEqualTo("INSUFFICIENT_BALANCE");
-        assertThat(transferRepository.countByAccountNumbers(source, target)).isZero();
+        assertThat(transferCountTestRepository.countByAccountNumbers(source, target)).isZero();
         assertThat(transferIdempotencyRepository.findByIdempotencyKey(key)).isEmpty();
         assertThat(accountRepository.findByAccountNumber(source).orElseThrow().getBalance())
                 .isEqualByComparingTo(new BigDecimal("500"));
@@ -362,7 +366,7 @@ class TransferIdempotencyIT extends AbstractIntegrationIT {
         ResponseEntity<TransferResponse> retried =
                 postTransfer(source, target, new BigDecimal("200"), key);
         assertThat(retried.getStatusCode()).isEqualTo(HttpStatus.CREATED);
-        assertThat(transferRepository.countByAccountNumbers(source, target)).isEqualTo(1);
+        assertThat(transferCountTestRepository.countByAccountNumbers(source, target)).isEqualTo(1);
         assertThat(accountRepository.findByAccountNumber(source).orElseThrow().getBalance())
                 .isEqualByComparingTo(new BigDecimal("300"));
         assertThat(accountRepository.findByAccountNumber(target).orElseThrow().getBalance())
@@ -419,7 +423,7 @@ class TransferIdempotencyIT extends AbstractIntegrationIT {
         assertThat(createdOrReplay.get() + inProgress.get()).isEqualTo(threads);
         assertThat(createdOrReplay.get()).isGreaterThanOrEqualTo(1);
         assertThat(countCompletedTransfers(source, target)).isEqualTo(1);
-        assertThat(transferRepository.countByAccountNumbers(source, target)).isEqualTo(1);
+        assertThat(transferCountTestRepository.countByAccountNumbers(source, target)).isEqualTo(1);
 
         ResponseEntity<TransferResponse> replay =
                 postTransfer(source, target, new BigDecimal("3000"), key);
