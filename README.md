@@ -113,6 +113,8 @@ gradlew.bat bootRun
 ./gradlew bootRun
 ```
 
+`gradlew` 래퍼는 Git에 실행 가능 상태로 저장되어 있습니다. `.gitattributes`가 `gradlew`는 LF, `*.bat`는 CRLF로 유지하므로, 새로 clone하면 별도의 `chmod` 없이 `./gradlew`를 실행할 수 있습니다.
+
 - 기본 포트: `8080`
 - Swagger UI: [http://localhost:8080/swagger-ui.html](http://localhost:8080/swagger-ui.html)
 - OpenAPI JSON: [http://localhost:8080/api-docs](http://localhost:8080/api-docs)
