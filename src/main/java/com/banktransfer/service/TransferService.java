@@ -239,11 +239,32 @@ public class TransferService {
         if (row.getStatus() != TransferIdempotencyStatus.SUCCESS || row.getTransfer() == null) {
             throw new InProgressException("요청이 처리 중입니다.");
         }
-        Transfer previous = row.getTransfer();
+        return toStoredResponse(row.getTransfer());
+    }
+
+    /**
+     * 재응답과 조회는 계좌의 현재 잔액이 아니라, 커밋 때 원장에 남긴 balanceAfter를 쓴다.
+     * 출금은 DEBIT, 입금은 CREDIT. 원장이 없으면 데이터 불일치이므로 404가 아니라 500이다.
+     */
+    private TransferResponse toStoredResponse(Transfer transfer) {
+        Long transferId = transfer.getId();
         return toResponse(
-                previous,
-                previous.getSourceAccount().getBalance(),
-                previous.getTargetAccount().getBalance());
+                transfer,
+                ledgerBalanceAfter(transferId, TransactionType.DEBIT),
+                ledgerBalanceAfter(transferId, TransactionType.CREDIT));
+    }
+
+    private BigDecimal ledgerBalanceAfter(Long transferId, TransactionType type) {
+        return accountTransactionRepository.findByTransferIdAndType(transferId, type)
+                .map(AccountTransaction::getBalanceAfter)
+                .orElseThrow(() -> missingLedger(transferId, type));
+    }
+
+    private BusinessException missingLedger(Long transferId, TransactionType type) {
+        log.error("이체 원장이 없어 이체 시점 잔액을 복원할 수 없습니다. transferId={}, type={}", transferId, type);
+        return new BusinessException(
+                AppErrorCode.INTERNAL_ERROR,
+                AppErrorCode.INTERNAL_ERROR.getDefaultMessage());
     }
 
     private String requireIdempotencyKey(String idempotencyKey) {
@@ -278,7 +299,7 @@ public class TransferService {
         java.util.Objects.requireNonNull(id, "id");
         Transfer transfer = transferRepository.findById(id)
                 .orElseThrow(() -> new NotFoundException("이체를 찾을 수 없습니다: " + id));
-        return toResponse(transfer, null, null);
+        return toStoredResponse(transfer);
     }
 
     private void validateRequest(TransferRequest request) {

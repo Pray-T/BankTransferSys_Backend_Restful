@@ -1,6 +1,7 @@
 package com.banktransfer;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.math.BigDecimal;
 import java.sql.Connection;
@@ -24,6 +25,7 @@ import javax.sql.DataSource;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
@@ -39,7 +41,12 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.banktransfer.dto.ErrorResponse;
 import com.banktransfer.dto.TransferRequest;
 import com.banktransfer.dto.TransferResponse;
+import com.banktransfer.model.Account;
+import com.banktransfer.model.AccountTransaction;
+import com.banktransfer.model.TransactionType;
+import com.banktransfer.model.Transfer;
 import com.banktransfer.model.TransferIdempotencyStatus;
+import com.banktransfer.repository.AccountTransactionRepository;
 import com.banktransfer.repository.TransferIdempotencyRepository;
 import com.banktransfer.repository.TransferRepository;
 import com.banktransfer.support.AbstractIntegrationIT;
@@ -58,6 +65,9 @@ class TransferIdempotencyIT extends AbstractIntegrationIT {
 
     @Autowired
     private TransferIdempotencyRepository transferIdempotencyRepository;
+
+    @Autowired
+    private AccountTransactionRepository accountTransactionRepository;
 
     @Autowired
     private ObjectMapper objectMapper;
@@ -381,7 +391,98 @@ class TransferIdempotencyIT extends AbstractIntegrationIT {
         assertThat(jsonNumber(replay.getBody(), "targetBalanceAfter")).isEqualTo(firstTargetBalance);
         assertThat(firstSourceBalance).doesNotContain(".");
         assertThat(firstTargetBalance).doesNotContain(".");
+        assertThat(jsonNumber(fetched.getBody(), "sourceBalanceAfter")).isEqualTo(firstSourceBalance);
+        assertThat(jsonNumber(fetched.getBody(), "targetBalanceAfter")).isEqualTo(firstTargetBalance);
         assertThat(countCompletedTransfers(source, target)).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("같은 이체·같은 유형의 원장을 다시 저장하면 거부되고 두 번째 행은 생기지 않는다")
+    void duplicateLedgerPosting_isRejected() throws Exception {
+        assertLedgerUniqueIndex();
+
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String source = "SRC-LG-" + suffix;
+        String target = "TGT-LG-" + suffix;
+        seedAccount(source, new BigDecimal("100000"));
+        seedAccount(target, BigDecimal.ZERO);
+
+        ResponseEntity<TransferResponse> created =
+                postTransfer(source, target, new BigDecimal("1500"), "ledger-" + suffix);
+        assertThat(created.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        Long transferId = created.getBody().getTransferId();
+        assertThat(countLedgerRows(transferId, "DEBIT")).isEqualTo(1);
+
+        Transfer transfer = transferRepository.findById(transferId).orElseThrow();
+        Account sourceAccount = accountRepository.findByAccountNumber(source).orElseThrow();
+        AccountTransaction duplicate = new AccountTransaction(
+                sourceAccount,
+                transfer,
+                TransactionType.DEBIT,
+                new BigDecimal("1500"),
+                BigDecimal.ONE);
+
+        assertThatThrownBy(() -> accountTransactionRepository.saveAndFlush(duplicate))
+                .isInstanceOf(DataIntegrityViolationException.class);
+
+        assertThat(countLedgerRows(transferId, "DEBIT")).isEqualTo(1);
+        assertThat(countLedgerRows(transferId, "CREDIT")).isEqualTo(1);
+        AccountTransaction stored = accountTransactionRepository
+                .findByTransferIdAndType(transferId, TransactionType.DEBIT)
+                .orElseThrow();
+        assertThat(stored.getBalanceAfter()).isEqualByComparingTo(new BigDecimal("98500"));
+    }
+
+    @Test
+    @DisplayName("이후 잔액이 바뀌어도 같은 키 재응답과 조회는 처음 잔액과 transferId를 돌려준다")
+    void replayAfterLaterTransfer_returnsOriginalBalances() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String source = "SRC-BL-" + suffix;
+        String target = "TGT-BL-" + suffix;
+        seedAccount(source, new BigDecimal("100000"));
+        seedAccount(target, BigDecimal.ZERO);
+
+        String key = "balance-replay-" + suffix;
+        ResponseEntity<TransferResponse> first =
+                postTransfer(source, target, new BigDecimal("1000"), key);
+        assertThat(first.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        assertThat(first.getBody()).isNotNull();
+        assertThat(first.getBody().getSourceBalanceAfter()).isEqualByComparingTo(new BigDecimal("99000"));
+        assertThat(first.getBody().getTargetBalanceAfter()).isEqualByComparingTo(new BigDecimal("1000"));
+
+        ResponseEntity<TransferResponse> later =
+                postTransfer(target, source, new BigDecimal("400"), "later-" + suffix);
+        assertThat(later.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        assertThat(accountRepository.findByAccountNumber(source).orElseThrow().getBalance())
+                .isEqualByComparingTo(new BigDecimal("99400"));
+        assertThat(accountRepository.findByAccountNumber(target).orElseThrow().getBalance())
+                .isEqualByComparingTo(new BigDecimal("600"));
+
+        ResponseEntity<TransferResponse> replay = postTransfer(source, target, new BigDecimal("1000"), key);
+        assertThat(replay.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        assertThat(replay.getBody()).isNotNull();
+        assertThat(replay.getBody().getTransferId()).isEqualTo(first.getBody().getTransferId());
+        assertThat(replay.getBody().getSourceBalanceAfter())
+                .isEqualByComparingTo(first.getBody().getSourceBalanceAfter());
+        assertThat(replay.getBody().getTargetBalanceAfter())
+                .isEqualByComparingTo(first.getBody().getTargetBalanceAfter());
+        assertThat(replay.getBody().getSourceBalanceAfter()).isEqualByComparingTo(new BigDecimal("99000"));
+        assertThat(replay.getBody().getTargetBalanceAfter()).isEqualByComparingTo(new BigDecimal("1000"));
+
+        ResponseEntity<TransferResponse> fetched = restTemplate.getForEntity(
+                "/api/transfers/" + first.getBody().getTransferId(),
+                TransferResponse.class);
+        assertThat(fetched.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(fetched.getBody()).isNotNull();
+        assertThat(fetched.getBody().getSourceBalanceAfter()).isEqualByComparingTo(new BigDecimal("99000"));
+        assertThat(fetched.getBody().getTargetBalanceAfter()).isEqualByComparingTo(new BigDecimal("1000"));
+
+        assertThat(accountRepository.findByAccountNumber(source).orElseThrow().getBalance())
+                .isEqualByComparingTo(new BigDecimal("99400"));
+        assertThat(accountRepository.findByAccountNumber(target).orElseThrow().getBalance())
+                .isEqualByComparingTo(new BigDecimal("600"));
+        assertThat(countCompletedTransfers(source, target)).isEqualTo(1);
+        assertThat(countCompletedTransfers(target, source)).isEqualTo(1);
     }
 
     @Test
@@ -486,6 +587,55 @@ class TransferIdempotencyIT extends AbstractIntegrationIT {
                 int scale = rows.getInt("NUMERIC_SCALE");
                 assertThat(rows.wasNull()).isFalse();
                 assertThat(scale).isZero();
+            }
+        }
+    }
+
+    private void assertLedgerUniqueIndex() throws Exception {
+        try (Connection connection = dataSource.getConnection()) {
+            assertThat(connection.getCatalog()).isEqualTo("bank_transfer_test");
+            assertThat(connection.getCatalog()).isNotEqualToIgnoringCase("bank_TransferSys");
+            try (PreparedStatement statement = connection.prepareStatement(
+                    "SELECT NON_UNIQUE, SEQ_IN_INDEX, COLUMN_NAME "
+                            + "FROM information_schema.STATISTICS "
+                            + "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'account_transactions' "
+                            + "AND INDEX_NAME = ? "
+                            + "ORDER BY SEQ_IN_INDEX")) {
+                statement.setString(1, AccountTransaction.UNIQUE_TRANSFER_TYPE);
+                try (ResultSet rows = statement.executeQuery()) {
+                    assertThat(rows.next()).isTrue();
+                    assertThat(rows.getInt("NON_UNIQUE")).isZero();
+                    assertThat(rows.getInt("SEQ_IN_INDEX")).isEqualTo(1);
+                    assertThat(rows.getString("COLUMN_NAME")).isEqualToIgnoringCase("transfer_id");
+                    assertThat(rows.next()).isTrue();
+                    assertThat(rows.getInt("NON_UNIQUE")).isZero();
+                    assertThat(rows.getInt("SEQ_IN_INDEX")).isEqualTo(2);
+                    assertThat(rows.getString("COLUMN_NAME")).isEqualToIgnoringCase("type");
+                    assertThat(rows.next()).isFalse();
+                }
+            }
+            try (PreparedStatement statement = connection.prepareStatement(
+                    "SELECT COUNT(*) FROM information_schema.STATISTICS "
+                            + "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'account_transactions' "
+                            + "AND INDEX_NAME = 'idx_account_tx_transfer'")) {
+                try (ResultSet rows = statement.executeQuery()) {
+                    assertThat(rows.next()).isTrue();
+                    assertThat(rows.getLong(1)).isZero();
+                }
+            }
+        }
+    }
+
+    private long countLedgerRows(long transferId, String type) throws Exception {
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement statement = connection.prepareStatement(
+                        "SELECT COUNT(*) FROM account_transactions WHERE transfer_id = ? AND type = ?")) {
+            assertThat(connection.getCatalog()).isEqualTo("bank_transfer_test");
+            statement.setLong(1, transferId);
+            statement.setString(2, type);
+            try (ResultSet rows = statement.executeQuery()) {
+                assertThat(rows.next()).isTrue();
+                return rows.getLong(1);
             }
         }
     }

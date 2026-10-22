@@ -72,7 +72,7 @@ src/test/
 - JDK 17+
 - MySQL 8  
   - 앱 실행: `bank_TransferSys`  
-  - 통합 테스트: `bank_transfer_test` (`TEST_DB_NAME`만 사용하고 `DB_NAME`은 읽지 않음. 없으면 JDBC가 생성, `create-drop`은 이 스키마만 정리)
+  - 통합 테스트: `bank_transfer_test` (JDBC 스키마는 `TEST_DB_NAME`만 사용하고 `DB_NAME`은 스키마로 쓰지 않음. 없으면 JDBC가 생성, `create-drop`은 이 스키마만 정리)
 - Redis (기본 포트: `6379`)  
   - 앱: DB index `0`  
   - 통합 테스트: DB index `1` (`TEST_REDIS_DATABASE`. 앱의 `REDIS_DATABASE`와 분리)
@@ -124,7 +124,7 @@ gradlew.bat bootRun
 
 | Method | Path | 설명 |
 |--------|------|------|
-| POST | `/api/transfers` | 이체 생성 (`Idempotency-Key` 필수. 생략·공백은 400, 서버는 키를 생성하지 않음) |
+| POST | `/api/transfers` | 이체 생성 (`Idempotency-Key` 필수. 생략·공백·128자 초과·ASCII 아님은 400, 서버는 키를 생성하지 않음) |
 | GET | `/api/transfers/{id}` | 이체 조회 |
 | GET | `/api/accounts/{accountNumber}` | 계좌번호로 계좌 조회 |
 | POST | `/api/dev/generate-accounts` | dev profile 전용 — 더미 고객·계좌 약 200만 건 생성 |
@@ -158,11 +158,11 @@ curl -i -X POST "http://localhost:8080/api/transfers" \
 }
 ```
 
-금액은 원화 정수입니다. 원화에는 소수 단위가 없으므로 `double`/`float`를 쓰지 않고, `accounts.balance`, `transfers.amount`, `account_transactions.amount`, `account_transactions.balance_after`는 `DECIMAL(19,0)`입니다. 이체 금액은 1원 이상, 정수 15자리(`999999999999999`원) 이하이며, 소수이거나 자릿수를 넘으면 `400 VALIDATION_ERROR`입니다. 생성·같은 키 재응답·조회의 금액은 소수 없는 같은 정수로 나갑니다.
+금액은 원화 정수입니다. 원화에는 소수 단위가 없으므로 `double`/`float`를 쓰지 않고, `accounts.balance`, `transfers.amount`, `account_transactions.amount`, `account_transactions.balance_after`는 `DECIMAL(19,0)`입니다. 이체 금액은 1원 이상, 정수 15자리(`999999999999999`원) 이하입니다. 1원 미만, 소수점 표기(`1000.6`, `1000.00`), 15자리를 넘는 값은 반올림하지 않고 `400 VALIDATION_ERROR`입니다. 생성·같은 키 재응답·조회의 금액은 소수 없는 같은 정수로 나갑니다.
 
-`Idempotency-Key`는 필수입니다. 헤더를 빼거나 공백만 보내면 `400 VALIDATION_ERROR`이고, 서버는 UUID를 만들지 않습니다. 키는 최대 128자이며 앞뒤 공백은 제거합니다. ASCII가 아닌 문자는 `400 VALIDATION_ERROR`입니다.
+`Idempotency-Key`는 필수입니다. 헤더를 빼거나 공백만 보내면 `400 VALIDATION_ERROR`이고, 서버는 UUID를 만들지 않습니다. 앞뒤 공백은 제거합니다. 공백을 뺀 키가 128자를 넘거나 ASCII가 아니면 `400 VALIDATION_ERROR`입니다.
 
-같은 키와 같은 본문(출금 계좌, 입금 계좌, 금액)으로 다시 호출하면 이중 이체 없이 **처음 이체의 `transferId`**를 `201`으로 반환합니다. 같은 키와 다른 본문은 `409 Conflict`이며 두 번째 이체를 만들지 않습니다.
+같은 키와 같은 본문(출금 계좌, 입금 계좌, 금액)으로 다시 호출하면 이중 이체 없이 **처음 이체의 `transferId`**를 `201`으로 반환합니다. `sourceBalanceAfter`와 `targetBalanceAfter`는 계좌의 현재 잔액이 아니라, 그 이체가 커밋될 때 원장 `account_transactions.balance_after`에 적어 둔 출금·입금 잔액입니다. 출금·입금 원장 중 하나라도 없으면 `500`입니다. 이후 다른 이체로 잔액이 바뀌어도 재응답은 처음과 같고, 돈은 다시 움직이지 않습니다. 같은 키와 다른 본문은 `409 Conflict`이며 두 번째 이체를 만들지 않습니다. 키는 대소문자를 구분하므로 `AbC`와 `abc`는 같은 키의 재조회가 아닙니다.
 
 **2) 이체 조회** — `GET /api/transfers/{id}`
 
@@ -170,7 +170,7 @@ curl -i -X POST "http://localhost:8080/api/transfers" \
 curl -i "http://localhost:8080/api/transfers/1"
 ```
 
-응답 본문 필드는 위 `TransferResponse`와 동일합니다 (`200 OK`).
+응답 본문 필드는 위 `TransferResponse`와 동일합니다 (`200 OK`). 잔액도 같은 원장 `balance_after`입니다. 없는 이체는 `404`이고, 원장 행이 없으면 `500`입니다.
 
 ## 테스트
 
@@ -182,7 +182,7 @@ curl -i "http://localhost:8080/api/transfers/1"
 | Redis DB index | `0` | `1` |
 | 스키마 | `ddl-auto=update` (dev) | `ddl-auto=create-drop` |
 
-테스트 JDBC URL은 `DB_NAME`을 읽지 않습니다. 스키마는 `TEST_DB_NAME`(기본 `bank_transfer_test`)이고, `ddl-auto=create-drop`은 이 전용 DB에만 적용됩니다. 셸에 `DB_NAME=bank_TransferSys`가 있어도 개발 DB에는 접속하지 않습니다. 해석된 카탈로그가 `bank_TransferSys`이거나, 값이 정확히 `bank_transfer_test`가 아닌 `DB_NAME`과 같으면 Hibernate가 스키마를 바꾸기 전에 기동이 실패합니다. Redis 인덱스는 `TEST_REDIS_DATABASE`(기본 `1`)이며 `0`이면 같은 지점에서 실패합니다.
+테스트 JDBC URL은 `DB_NAME`을 읽지 않습니다. 스키마는 `TEST_DB_NAME`(기본 `bank_transfer_test`)이고, `ddl-auto=create-drop`은 이 전용 DB에만 적용됩니다. 셸에 `DB_NAME=bank_TransferSys`가 있어도 개발 DB에는 접속하지 않습니다. 기동 가드는 `DB_NAME`을 스키마로 쓰지 않고 해석된 카탈로그와만 비교합니다. 카탈로그가 대소문자와 관계없이 `bank_TransferSys`이거나, 대소문자를 가리지 않고 `_test`로 끝나지 않거나, 값이 정확히 `bank_transfer_test`가 아닌 `DB_NAME`과 대소문자 무시로 같으면 Hibernate가 스키마를 바꾸기 전에 기동이 실패합니다. Redis 인덱스는 `TEST_REDIS_DATABASE`(기본 `1`)이며 1 이상의 정수가 아니면 같은 지점에서 실패합니다.
 
 `ddl-auto=update`는 이미 있는 컬럼 타입을 바꾸지 않습니다. 개발 DB의 금액 컬럼이 예전 `DECIMAL(19,2)`이면 아래를 한 번 실행합니다. 이미 정수로 저장된 금액(`.00`)은 그대로이고, 테스트 DB는 `create-drop`이라 이 구문이 필요 없습니다.
 
@@ -194,6 +194,12 @@ ALTER TABLE accounts MODIFY balance DECIMAL(19,0) NOT NULL; ALTER TABLE transfer
 
 ```sql
 ALTER TABLE transfer_idempotency MODIFY idempotency_key VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin NOT NULL;
+```
+
+`ddl-auto=update`는 이미 있는 테이블에 유니크 인덱스를 항상 더하지 않고, 겹치는 기존 인덱스 `idx_account_tx_transfer`를 지우지도 않습니다. 개발 DB에 그 인덱스만 있으면 아래를 한 번 실행합니다. 테스트 DB는 `create-drop`이라 이 구문이 필요 없습니다.
+
+```sql
+ALTER TABLE account_transactions DROP INDEX idx_account_tx_transfer, ADD UNIQUE INDEX uk_account_tx_transfer_type (transfer_id, type);
 ```
 
 `DB_USERNAME` / `DB_PASSWORD`는 앱 실행과 동일하게 환경 변수로 주입합니다.
@@ -215,8 +221,8 @@ export DB_PASSWORD='your_mysql_password'
 | 테스트 클래스 | 검증 내용 |
 |--------------|----------|
 | `TransferConcurrencyIT` | 동일 출금 계좌 동시 이체 잔액 정합성, 교차 이체(A↔B) 데드락 부재 |
-| `MoneyUtilTest` | 정상 정수, 소수·음수·0·지수 표기·자릿수 초과 거절, 응답·해시용 scale 0 |
-| `TransferIdempotencyIT` | 키 생략·공백·ASCII 아님 400, 동일 키 재요청/동시 요청 단일 이체, 대소문자만 다른 키는 별개 이체, 완료 재조회는 쿨다운 스킵, 새 키 429, payload 충돌 409, 커밋 전 실패 후 같은 키 재사용, 소수·비정상 금액 400, 생성·재응답·조회의 금액 문자열이 같음 |
+| `MoneyUtilTest` | 정상 정수와 끝자리 0뿐인 소수(`1000.00`)는 scale 0, 소수 값·음수·0은 반올림 없이 거절, 정수로 떨어지는 지수 표기는 평문 정수, 자릿수 초과는 거절, 응답·해시용 scale 0 |
+| `TransferIdempotencyIT` | 키 생략·공백·ASCII 아님 400, 동일 키 재요청/동시 요청 단일 이체, 대소문자만 다른 키는 별개 이체, 완료 재조회는 쿨다운 스킵, 새 키 429, payload 충돌 409, 커밋 전 실패 후 같은 키 재사용, 소수·비정상 금액 400, 생성·재응답·조회의 금액 문자열이 같음, 같은 원장 재저장은 거부, 이후 잔액이 바뀌어도 재응답·조회 잔액은 처음 값 |
 | `TransferCommitCacheFailureIT` | 커밋 후 쿨다운 기록 실패에도 201, 같은 키 재요청은 같은 transferId이며 잔액은 다시 움직이지 않음 |
 
 ## 아키텍처 다이어그램
@@ -285,7 +291,7 @@ sequenceDiagram
     participant MySQL as MySQL
     C->>TC: POST /api/transfers<br/>(Idempotency-Key 필수)
     TC->>TS: createTransfer(request, key)
-    alt 키 생략 또는 공백
+    alt 키 생략·공백·128자 초과·ASCII 아님
         TS-->>C: 400 VALIDATION_ERROR<br/>(서버는 UUID를 만들지 않음)
     else 키가 있음
         Note over TS: 1단계: 요청 검증·본문 해시<br/>(출금/입금 계좌, 금액)
@@ -334,7 +340,7 @@ sequenceDiagram
 ```mermaid
 graph LR
     REQ["이체 요청"] --> KEY{"Idempotency-Key"}
-    KEY -->|"생략·공백"| R0["400"]
+    KEY -->|"생략·공백·128자 초과·비ASCII"| R0["400"]
     KEY -->|"있음"| ID{"멱등성 행\n(MySQL 유니크)"}
     ID -->|"같은 키·같은 본문"| R3["201 같은 transferId\n(쿨다운 스킵)"]
     ID -->|"같은 키·다른 본문"| R5["409"]
@@ -382,7 +388,7 @@ MySQL InnoDB 기본 격리 수준인 **REPEATABLE READ**를 유지하고, 이체
 엔티티 수정 시 version이 증가하고, UPDATE 시점에 불일치하면 트랜잭션이 실패합니다(`409`). 이체 경로는 이미 `FOR UPDATE`로 직렬화되므로 정상 흐름에서는 거의 발동하지 않습니다. 비관적 잠금이 누락된 코드 경로를 대비한 **저비용 안전망**으로 두었습니다.
 
 **멱등성키 (Idempotency-Key)**  
-클라이언트가 발급한 헤더입니다. **필수**이며, 생략·공백은 `400 VALIDATION_ERROR`입니다. 서버는 키를 생성하지 않습니다. 응답이 유실돼도 클라이언트가 같은 키로 다시 보내면 처음 이체를 찾을 수 있습니다.
+클라이언트가 발급한 헤더입니다. **필수**이며, 생략·공백·128자 초과·ASCII가 아닌 값은 `400 VALIDATION_ERROR`입니다. 서버는 키를 생성하지 않습니다. 응답이 유실돼도 클라이언트가 같은 키로 다시 보내면 처음 이체를 찾을 수 있습니다.
 
 재조회의 원본은 MySQL `transfer_idempotency`입니다. 이체와 **같은 트랜잭션**에 INSERT하고, 성공 시 그 행을 `SUCCESS`로 바꾸며 `transfer_id`를 연결합니다. `REQUIRES_NEW`로 따로 커밋하지 않습니다. 롤백되면 이체와 멱등성 행이 함께 사라져 같은 키를 다시 쓸 수 있습니다. 실패 상태를 별도 트랜잭션에 남기지 않습니다.
 
@@ -393,13 +399,14 @@ MySQL InnoDB 기본 격리 수준인 **REPEATABLE READ**를 유지하고, 이체
 | 상태 | 응답 |
 |------|------|
 | 헤더 생략·공백 | `400` — 이체 행 없음. 서버는 UUID를 만들지 않음 |
+| 128자 초과 | `400 VALIDATION_ERROR` — 이체 행 없음 |
 | ASCII가 아닌 키 | `400 VALIDATION_ERROR` — 이체 행 없음 |
-| 같은 키 + 같은 본문 (`SUCCESS`) | `201 Created` — 원래 `transferId` (**쿨다운 검사 전**) |
+| 같은 키 + 같은 본문 (`SUCCESS`) | `201 Created` — 원래 `transferId`와 원장에 남은 이체 시점 잔액. 원장이 없으면 `500` (**쿨다운 검사 전**) |
 | 같은 키 + 다른 본문 | `409 Conflict` — 추가 이체 없음 |
 | 커밋 전 실패 (잔액 부족, 검증, 없음 등) | 해당 비즈니스 오류. 멱등성 행도 롤백되어 같은 키 재사용 가능 |
 | 같은 키 동시 요청 | 유니크 인덱스에서 대기한 뒤 커밋된 행을 재조회. 이체는 하나 |
 
-- 유니크 인덱스: `transfer_idempotency.uk_transfer_idempotency_key` (`idempotency_key`, `ascii_bin`)
+- 유니크 인덱스: `transfer_idempotency.uk_transfer_idempotency_key` (`idempotency_key` 한 컬럼, collation `ascii_bin`)
 - MySQL `SUCCESS` 행은 TTL로 지우지 않습니다. 지우면 같은 키로 다시 출금할 수 있습니다.
 - Redis 캐시 키: `idempo:TRANSFER:{Idempotency-Key}` (요청 경로에서 재조회하지 않음)
 - Redis TTL: **24시간(86400s)** — 캐시에만 적용
@@ -487,7 +494,9 @@ WHERE name LIKE 'ql%'
 | `transfers` | `idx_transfer_created_at` | created_at | 최신 이체 내역 조회 |
 | `transfer_idempotency` | `uk_transfer_idempotency_key` | idempotency_key (UNIQUE) | 멱등성 키 재조회·동시 중복 차단 |
 | `account_transactions` | `idx_account_tx_account` | account_id | 계좌별 거래내역 조회 |
-| `account_transactions` | `idx_account_tx_transfer` | transfer_id | 이체별 거래내역 조회 |
+| `account_transactions` | `uk_account_tx_transfer_type` | transfer_id, type (UNIQUE) | 이체·유형당 원장 1건. 선행 컬럼 `transfer_id`로 이체별 조회도 커버 |
+
+`balance_after`는 이체 시점 잔액의 근거입니다. 재응답과 조회는 계좌의 현재 잔액 대신 이 값을 읽습니다. `transfer_id`만 있던 `idx_account_tx_transfer`는 유니크 인덱스의 왼쪽 컬럼과 겹쳐 제거했습니다. `idx_account_tx_account`는 유니크 키에 없는 컬럼이라 그대로 둡니다.
 
 ### 측정 결과 (참고)
 
