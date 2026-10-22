@@ -27,7 +27,7 @@
 - MySQL **Idempotency-Key**(이체와 같은 트랜잭션, 유니크 인덱스)로 중복 이체를 막고, Redis **쿨다운 키**로 연속 요청 간격을 제한
 - MySQL **Serializable 세션 실험**에서 락 대기 타임아웃을 확인한 뒤, **REPEATABLE READ + 비관적 잠금**으로 전환한 근거 문서화
 - `@Version` 낙관적 잠금을 비관적 잠금의 **추가 안전망**으로 배치 (정상 이체 경로에서는 거의 발동하지 않음)
-- 멱등성 결과는 이체와 **같은 MySQL 트랜잭션**에 커밋하고, Redis 캐시·쿨다운만 **afterCommit**에 기록합니다. 커밋 후 Redis가 실패해도 이미 커밋된 이체는 `201`이며, 같은 키 재요청은 MySQL에서 같은 `transferId`를 돌려 두 번째 출금을 만들지 않습니다.
+- 멱등성 결과는 이체와 **같은 MySQL 트랜잭션**에 커밋합니다. 쿨다운 키는 커밋 전에 Redis `SET key value NX EX`로 원자적으로 잡습니다. 같은 방향의 새 키가 동시에 들어와도 둘 다 통과하지 못하고, 롤백된 이체는 그 키를 해제합니다. 커밋된 이체는 키를 유지합니다. 같은 키 재조회는 새 쿨다운 획득이 아닙니다. Redis 멱등성 캐시만 **afterCommit**에 기록하며, 캐시 기록이 실패해도 이미 커밋된 이체는 `201`이고 같은 키 재요청은 MySQL에서 같은 `transferId`를 돌려 두 번째 출금을 만들지 않습니다.
 - 약 200만 건 고객 데이터로 **복합 인덱스** 조회 실험
 
 ## 프로젝트 구조
@@ -58,7 +58,7 @@ src/test/
 ├── java/com/banktransfer/
 │   ├── TransferConcurrencyIT.java      # 동시성 정합성 통합 테스트
 │   ├── TransferIdempotencyIT.java      # 멱등성/쿨다운 통합 테스트
-│   ├── TransferCommitCacheFailureIT.java # 커밋 후 Redis/쿨다운 실패 통합 테스트
+│   ├── TransferCommitCacheFailureIT.java # 커밋 후 캐시 실패·쿨다운 획득 실패 통합 테스트
 │   ├── util/MoneyUtilTest.java         # 원화 금액 단위 테스트
 │   └── support/AbstractIntegrationIT.java # 로컬 MySQL/Redis 통합 테스트 기반 클래스
 └── resources/
@@ -223,7 +223,7 @@ export DB_PASSWORD='your_mysql_password'
 | `TransferConcurrencyIT` | 동일 출금 계좌 동시 이체 잔액 정합성, 교차 이체(A↔B) 데드락 부재 |
 | `MoneyUtilTest` | 정상 정수와 끝자리 0뿐인 소수(`1000.00`)는 scale 0, 소수 값·음수·0은 반올림 없이 거절, 정수로 떨어지는 지수 표기는 평문 정수, 자릿수 초과는 거절, 응답·해시용 scale 0 |
 | `TransferIdempotencyIT` | 키 생략·공백·ASCII 아님 400, 동일 키 재요청/동시 요청 단일 이체, 대소문자만 다른 키는 별개 이체, 완료 재조회는 쿨다운 스킵, 새 키 429, payload 충돌 409, 커밋 전 실패 후 같은 키 재사용, 소수·비정상 금액 400, 생성·재응답·조회의 금액 문자열이 같음, 같은 원장 재저장은 거부, 이후 잔액이 바뀌어도 재응답·조회 잔액은 처음 값 |
-| `TransferCommitCacheFailureIT` | 커밋 후 쿨다운 기록 실패에도 201, 같은 키 재요청은 같은 transferId이며 잔액은 다시 움직이지 않음 |
+| `TransferCommitCacheFailureIT` | 커밋 후 멱등성 캐시 실패에도 201이고 같은 키 재요청은 잔액을 다시 움직이지 않음. 쿨다운 획득 중 Redis 실패는 이체를 커밋하지 않음 |
 
 ## 아키텍처 다이어그램
 
@@ -311,24 +311,28 @@ sequenceDiagram
                 TS->>MySQL: SELECT 커밋된 행
                 TS-->>C: 201 재조회 또는 409
             else INSERT 성공
-                TS->>TTS: enforceCooldown()
-                TTS->>Redis: hasKey(trans:cooldown:출금->입금)
-                alt 쿨다운 중 (새 키의 간격 제한)
+                TS->>TTS: acquire()
+                TTS->>Redis: SET trans:cooldown:출금->입금 token NX EX 10
+                alt 키를 차지하지 못함 (새 키의 간격 제한)
                     TTS-->>TS: TransferCooldownException
-                    Note over MySQL: 롤백 — 아직 이체 전이라 멱등성 행만 삭제
+                    Note over MySQL: 롤백 — 멱등성 행 삭제. 기존 쿨다운 키는 유지
                     TS-->>C: 429 TOO_MANY_REQUESTS
-                else 통과
+                else 키 획득
                     TS->>AR: findByAccountNumberForUpdate (계좌번호 정렬)
                     AR->>MySQL: SELECT ... FOR UPDATE
-                    TS->>MySQL: Transfer·분개 저장, 멱등성 SUCCESS
-                    TS->>MySQL: COMMIT
-                    Note over TS,Redis: 4단계: afterCommit 캐시·쿨다운<br/>(예외는 ERROR 로그 후 삼킴, 응답은 201)
-                    TS->>IS: cacheSuccess
-                    IS->>Redis: SET 캐시 (TTL)
-                    TS->>TTS: markSuccess
-                    TTS->>Redis: SET 쿨다운 TTL 10초
-                    TS-->>TC: TransferResponse
-                    TC-->>C: 201 Created (+ Idempotency-Key 헤더)
+                    alt 잔액 부족 등 롤백
+                        TTS->>Redis: 자기 토큰일 때만 DEL
+                        Note over MySQL: 이체·멱등성 행 롤백, 쿨다운 키 해제
+                        TS-->>C: 비즈니스 오류
+                    else 이체 성공
+                        TS->>MySQL: Transfer·분개 저장, 멱등성 SUCCESS
+                        TS->>MySQL: COMMIT
+                        Note over TS,Redis: 쿨다운 키는 TTL까지 유지<br/>afterCommit은 멱등성 캐시만<br/>(예외는 ERROR 로그 후 삼킴, 응답은 201)
+                        TS->>IS: cacheSuccess
+                        IS->>Redis: SET 캐시 (TTL)
+                        TS-->>TC: TransferResponse
+                        TC-->>C: 201 Created (+ Idempotency-Key 헤더)
+                    end
                 end
             end
         end
@@ -344,7 +348,7 @@ graph LR
     KEY -->|"있음"| ID{"멱등성 행\n(MySQL 유니크)"}
     ID -->|"같은 키·같은 본문"| R3["201 같은 transferId\n(쿨다운 스킵)"]
     ID -->|"같은 키·다른 본문"| R5["409"]
-    ID -->|"신규 키"| CD{"쿨다운키\n(Redis, 간격 제한)"}
+    ID -->|"신규 키"| CD{"쿨다운키\n(SET NX, 커밋 전)"}
     CD -->|"10초 내 동일 방향 새 키"| R1["429"]
     CD -->|"통과"| PL{"비관적 잠금\nSELECT FOR UPDATE\n(MySQL)"}
     PL --> OL{"낙관적 잠금 @Version\n(안전망, 정상경로 거의 미발동)"}
@@ -411,23 +415,27 @@ MySQL InnoDB 기본 격리 수준인 **REPEATABLE READ**를 유지하고, 이체
 - Redis 캐시 키: `idempo:TRANSFER:{Idempotency-Key}` (요청 경로에서 재조회하지 않음)
 - Redis TTL: **24시간(86400s)** — 캐시에만 적용
 
-**P.S) 커밋 후 Redis (캐시·쿨다운)**  
-멱등성 `SUCCESS`는 커밋 전에 MySQL에 있습니다. `afterCommit`은 Redis 캐시와 쿨다운만 기록합니다. 여기서 예외가 나면 SLF4J `ERROR`로 남기고 삼키며, HTTP 응답은 바꾸지 않습니다. 이미 커밋된 이체는 `201`이고, 같은 키 재요청은 MySQL을 봐서 같은 `transferId`를 반환합니다. Redis가 죽어도 그 키로 한 번 더 출금되지 않습니다.
+**P.S) 커밋 후 Redis 캐시**  
+멱등성 `SUCCESS`는 커밋 전에 MySQL에 있습니다. 쿨다운 키도 그 전에 `SET NX`로 이미 잡혀 있습니다. `afterCommit`은 Redis 멱등성 캐시만 기록합니다. 캐시 기록에서 예외가 나면 SLF4J `ERROR`로 남기고 삼키며, HTTP 응답은 바꾸지 않습니다. 이미 커밋된 이체는 `201`이고, 같은 키 재요청은 MySQL을 봐서 같은 `transferId`를 반환합니다. 캐시용 Redis가 죽어도 그 키로 한 번 더 출금되지 않습니다. 쿨다운 획득 자체가 실패하면 이체는 커밋하지 않습니다.
 
 | 시점 | 처리 |
 |------|------|
-| 이체 로직 중 예외 | 트랜잭션 롤백 — 이체와 PENDING 멱등성 행이 함께 삭제 |
-| 커밋 성공 | MySQL에 이체 + `SUCCESS`가 이미 있음. `afterCommit`에서 Redis 캐시 + 쿨다운 |
-| 커밋 후 Redis/쿨다운 실패 | 이체는 유지. 응답은 `201`. 같은 키 재조회는 MySQL |
+| 이체 로직 중 예외 | 트랜잭션 롤백 — 이체와 PENDING 멱등성 행이 함께 삭제. 이번 요청이 잡은 쿨다운 키는 해제 |
+| 커밋 성공 | MySQL에 이체 + `SUCCESS`. 쿨다운 키는 TTL까지 유지. `afterCommit`에서 Redis 캐시 |
+| 커밋 후 캐시 실패 | 이체는 유지. 응답은 `201`. 같은 키 재조회는 MySQL. 쿨다운 키도 유지 |
 
 **P.S) 같은 키 동시 요청**  
 나중 요청은 유니크 인덱스에서 먼저 커밋되는 트랜잭션을 기다린 다음, 커밋된 행을 읽어 재조회하거나(`201`) 본문이 다르면 `409`를 반환합니다. 두 번째 이체를 만들지 않습니다.
 
 **쿨다운키 (Cooldown Key)**  
-**동일한 출금 → 입금 방향** 이체가 성공한 뒤 10초 안에 **새 멱등성 키**로 다시 들어오면 `429 Too Many Requests`로 차단합니다. (역방향 B→A는 별도 키.)  
-이것은 **요청 간격 제한**입니다. 이중 출금 방지 장치가 아니며, **같은 키 재조회에는 적용하지 않습니다.** 쿨다운이 지나거나 Redis 기록이 실패해도 같은 키는 MySQL 멱등성 행이 막습니다.
+**동일한 출금 → 입금 방향**의 **새 멱등성 키**는 이체가 커밋되기 전에 Redis `SET key value NX EX` 한 번으로 쿨다운 키를 원자적으로 잡습니다. 키를 차지하지 못하면 `429 Too Many Requests`입니다. 그래서 같은 방향의 서로 다른 새 키가 동시에 들어와도 둘 다 통과하지 못합니다. 키 존재만 먼저 확인하고 커밋 뒤에 따로 기록하면, 둘 다 키가 없음을 본 뒤 각자 이체를 커밋할 수 있었습니다.
 
-- Redis 키: `trans:cooldown:{출금계좌}->{입금계좌}`
+이체가 롤백되면(잔액 부족, 검증 실패 등) 자기가 넣은 값일 때만 키를 지워, 다음 정상 요청이 TTL 동안 막히지 않게 합니다. 커밋된 이체는 키를 TTL 동안 유지합니다. 같은 키 재조회는 새 쿨다운 획득이 아니며 `429`로 막지 않습니다. (역방향 B→A는 별도 키.)
+
+이것은 **요청 간격 제한**입니다. 이중 출금 방지 장치가 아닙니다. 이중 출금은 이체와 같은 트랜잭션의 유니크 키가 막습니다.
+
+- Redis 키: `trans:cooldown:{출금계좌}->{입금계좌}` (계좌번호는 trim 후 `Locale.ROOT` 대문자)
+- 값: 요청마다 만든 토큰. 롤백 시 그 토큰과 같을 때만 삭제
 - TTL: **10초** (데모용)
 
 ### 데드락(Deadlock) 방지 전략

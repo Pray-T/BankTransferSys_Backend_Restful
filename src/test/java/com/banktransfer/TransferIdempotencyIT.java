@@ -9,6 +9,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -19,6 +20,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import javax.sql.DataSource;
 
@@ -130,7 +132,7 @@ class TransferIdempotencyIT extends AbstractIntegrationIT {
         assertThat(first.getBody()).isNotNull();
         assertThat(first.getHeaders().getFirst("Idempotency-Key")).isEqualTo(upperKey);
 
-        stringRedisTemplate.delete("trans:cooldown:" + source + "->" + target);
+        stringRedisTemplate.delete(cooldownKey(source, target));
 
         ResponseEntity<TransferResponse> second = postTransfer(source, target, amount, lowerKey);
         assertThat(second.getStatusCode()).isEqualTo(HttpStatus.CREATED);
@@ -187,6 +189,74 @@ class TransferIdempotencyIT extends AbstractIntegrationIT {
         ResponseEntity<String> second =
                 postTransferRaw(source, target, new BigDecimal("1000"), "cd-second-" + suffix);
         assertThat(second.getStatusCode()).isEqualTo(HttpStatus.TOO_MANY_REQUESTS);
+    }
+
+    @Test
+    @DisplayName("같은 방향의 서로 다른 키를 동시에 보내면 하나만 성공하고 나머지는 429이며 이체는 하나다")
+    void concurrentDifferentKeysSameDirection_onlyOnePassesCooldown() throws Exception {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String source = "SRC-RC-" + suffix;
+        String target = "TGT-RC-" + suffix;
+        seedAccount(source, new BigDecimal("100000"));
+        seedAccount(target, BigDecimal.ZERO);
+
+        long completedBefore = countCompletedTransfers(source, target);
+        int threads = 10;
+        BigDecimal amount = new BigDecimal("1000");
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        CountDownLatch ready = new CountDownLatch(threads);
+        CountDownLatch start = new CountDownLatch(1);
+        AtomicInteger created = new AtomicInteger();
+        AtomicInteger cooledDown = new AtomicInteger();
+        ConcurrentLinkedQueue<String> unexpected = new ConcurrentLinkedQueue<>();
+        AtomicReference<String> winnerKey = new AtomicReference<>();
+        AtomicReference<Long> winnerTransferId = new AtomicReference<>();
+
+        List<Future<?>> futures = new ArrayList<>();
+        for (int i = 0; i < threads; i++) {
+            String key = "cd-race-" + suffix + "-" + i;
+            futures.add(pool.submit(() -> {
+                ready.countDown();
+                start.await();
+                ResponseEntity<String> response = postTransferRaw(source, target, amount, key);
+                if (response.getStatusCode() == HttpStatus.CREATED) {
+                    created.incrementAndGet();
+                    winnerKey.set(key);
+                    winnerTransferId.set(readTransferId(response.getBody()));
+                } else if (response.getStatusCode() == HttpStatus.TOO_MANY_REQUESTS
+                        && response.getBody() != null
+                        && response.getBody().contains("TRANSFER_COOLDOWN")) {
+                    cooledDown.incrementAndGet();
+                } else {
+                    unexpected.add(response.getStatusCode() + " " + response.getBody());
+                }
+                return null;
+            }));
+        }
+
+        assertThat(ready.await(20, TimeUnit.SECONDS)).isTrue();
+        start.countDown();
+        for (Future<?> future : futures) {
+            future.get(60, TimeUnit.SECONDS);
+        }
+        pool.shutdown();
+        assertThat(pool.awaitTermination(10, TimeUnit.SECONDS)).isTrue();
+
+        assertThat(unexpected).isEmpty();
+        assertThat(created.get()).isEqualTo(1);
+        assertThat(cooledDown.get()).isEqualTo(threads - 1);
+        assertThat(countCompletedTransfers(source, target)).isEqualTo(completedBefore + 1);
+        assertThat(transferRepository.countByAccountNumbers(source, target)).isEqualTo(completedBefore + 1);
+        assertThat(accountRepository.findByAccountNumber(source).orElseThrow().getBalance())
+                .isEqualByComparingTo(new BigDecimal("99000"));
+        assertThat(accountRepository.findByAccountNumber(target).orElseThrow().getBalance())
+                .isEqualByComparingTo(new BigDecimal("1000"));
+
+        ResponseEntity<TransferResponse> replay = postTransfer(source, target, amount, winnerKey.get());
+        assertThat(replay.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        assertThat(replay.getBody()).isNotNull();
+        assertThat(replay.getBody().getTransferId()).isEqualTo(winnerTransferId.get());
+        assertThat(countCompletedTransfers(source, target)).isEqualTo(completedBefore + 1);
     }
 
     @Test
@@ -642,6 +712,11 @@ class TransferIdempotencyIT extends AbstractIntegrationIT {
 
     private long countCompletedTransfers(String source, String target) {
         return transferRepository.countCompletedByAccountNumbers(source, target);
+    }
+
+    private static String cooldownKey(String source, String target) {
+        return "trans:cooldown:" + source.trim().toUpperCase(Locale.ROOT)
+                + "->" + target.trim().toUpperCase(Locale.ROOT);
     }
 
     private Long readTransferId(String body) throws Exception {

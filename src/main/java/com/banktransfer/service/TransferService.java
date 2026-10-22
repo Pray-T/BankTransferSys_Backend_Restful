@@ -125,7 +125,8 @@ public class TransferService {
 
     /**
      * 멱등성 행을 먼저 넣어 유니크 인덱스를 잡은 뒤 이체한다.
-     * 비즈니스 예외는 이 트랜잭션을 롤백해 PENDING 행을 남기지 않는다.
+     * 같은 키 재조회는 이 메서드 밖에서 반환되므로 쿨다운을 다시 잡지 않는다.
+     * 비즈니스 예외는 이 트랜잭션을 롤백해 PENDING 행을 남기지 않고, 이번 요청의 쿨다운 키도 해제한다.
      */
     private TransferResponse performTransfer(TransferRequest request,
                                             String idempotencyKey,
@@ -137,7 +138,9 @@ public class TransferService {
         TransferIdempotency idempotency = transferIdempotencyRepository.saveAndFlush(
                 TransferIdempotency.pending(idempotencyKey, requestHash));
 
-        transferThrottleService.enforceCooldown(sourceAccountNumber, targetAccountNumber);
+        // 새 키만 커밋 전에 원자적으로 잡는다. 커밋 뒤에 기록하면 동시 요청이 둘 다 이체를 끝낼 수 있다.
+        String cooldownToken = transferThrottleService.acquire(sourceAccountNumber, targetAccountNumber);
+        registerCooldownReleaseOnRollback(sourceAccountNumber, targetAccountNumber, cooldownToken);
 
         String first = sourceAccountNumber.compareTo(targetAccountNumber) <= 0
                 ? sourceAccountNumber : targetAccountNumber;
@@ -180,7 +183,7 @@ public class TransferService {
                 target, transfer, TransactionType.CREDIT, amount, newTargetBalance));
 
         idempotency.markSuccess(transfer);
-        registerPostCommitCache(idempotencyKey, requestHash, transfer.getId(), sourceAccountNumber, targetAccountNumber);
+        registerPostCommitCache(idempotencyKey, requestHash, transfer.getId());
 
         log.info("이체 완료: {} -> {} 금액={}, 통화={}",
                 source.getAccountNumber(), target.getAccountNumber(), amount, Constants.DEFAULT_CURRENCY_CODE);
@@ -189,15 +192,39 @@ public class TransferService {
     }
 
     /**
-     * Redis 캐시와 쿨다운은 커밋 이후에만 기록한다. 여기서의 예외는 응답을 바꾸지 않는다.
+     * 커밋되면 쿨다운 키를 유지하고, 그 외(롤백·완료 상태를 모름)에는 이번 토큰일 때만 지운다.
+     */
+    private void registerCooldownReleaseOnRollback(String sourceAccountNumber,
+                                                   String targetAccountNumber,
+                                                   String cooldownToken) {
+        if (cooldownToken == null) {
+            return;
+        }
+        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+            log.error("트랜잭션 동기화가 비활성입니다. 롤백 시 쿨다운 키를 해제할 수 없습니다. source={}, target={}",
+                    sourceAccountNumber, targetAccountNumber);
+            return;
+        }
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCompletion(int status) {
+                if (status != STATUS_COMMITTED) {
+                    transferThrottleService.releaseIfOwned(
+                            sourceAccountNumber, targetAccountNumber, cooldownToken);
+                }
+            }
+        });
+    }
+
+    /**
+     * Redis 멱등성 캐시는 커밋 이후에만 기록한다. 여기서의 예외는 응답을 바꾸지 않는다.
+     * 쿨다운 키는 커밋 전에 이미 잡았으므로 여기서 다시 쓰지 않는다.
      */
     private void registerPostCommitCache(String idempotencyKey,
                                         String requestHash,
-                                        Long transferId,
-                                        String sourceAccountNumber,
-                                        String targetAccountNumber) {
+                                        Long transferId) {
         if (!TransactionSynchronizationManager.isSynchronizationActive()) {
-            log.error("트랜잭션 동기화가 비활성입니다. Redis 캐시와 쿨다운을 건너뜁니다. key={}, transferId={}",
+            log.error("트랜잭션 동기화가 비활성입니다. Redis 멱등성 캐시를 건너뜁니다. key={}, transferId={}",
                     idempotencyKey, transferId);
             return;
         }
@@ -208,12 +235,6 @@ public class TransferService {
                     idempotencyService.cacheSuccess(idempotencyKey, requestHash, transferId);
                 } catch (Exception ex) {
                     log.error("커밋된 이체의 Redis 멱등성 캐시 기록에 실패했습니다. key={}, transferId={}",
-                            idempotencyKey, transferId, ex);
-                }
-                try {
-                    transferThrottleService.markSuccess(sourceAccountNumber, targetAccountNumber);
-                } catch (Exception ex) {
-                    log.error("커밋된 이체의 쿨다운 기록에 실패했습니다. key={}, transferId={}",
                             idempotencyKey, transferId, ex);
                 }
             }

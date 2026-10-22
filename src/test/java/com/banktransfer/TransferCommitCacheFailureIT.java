@@ -5,6 +5,7 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 
 import java.math.BigDecimal;
@@ -24,7 +25,8 @@ import com.banktransfer.service.TransferThrottleService;
 import com.banktransfer.support.AbstractIntegrationIT;
 
 /**
- * 커밋 이후 Redis 캐시·쿨다운 실패가 이미 확정된 이체의 HTTP 결과를 바꾸지 않는지 검증한다.
+ * 커밋 이후 Redis 캐시 실패는 이미 확정된 이체의 HTTP 결과를 바꾸지 않는지,
+ * 쿨다운 획득 실패는 이체를 커밋하지 않는지 검증한다.
  */
 class TransferCommitCacheFailureIT extends AbstractIntegrationIT {
 
@@ -38,17 +40,17 @@ class TransferCommitCacheFailureIT extends AbstractIntegrationIT {
     private TransferRepository transferRepository;
 
     @Test
-    @DisplayName("커밋 후 쿨다운 기록 실패에도 201이고 같은 키 재요청은 돈을 다시 움직이지 않는다")
-    void postCommitCooldownFailure_stillReturnsCreatedAndReplays() {
+    @DisplayName("커밋 후 멱등성 캐시 기록 실패에도 201이고 같은 키 재요청은 돈을 다시 움직이지 않는다")
+    void postCommitCacheFailure_stillReturnsCreatedAndReplays() {
         String suffix = UUID.randomUUID().toString().substring(0, 8);
         String source = "SRC-RF-" + suffix;
         String target = "TGT-RF-" + suffix;
         seedAccount(source, new BigDecimal("100000"));
         seedAccount(target, BigDecimal.ZERO);
 
-        doThrow(new IllegalStateException("cooldown redis failed"))
-                .when(transferThrottleService)
-                .markSuccess(anyString(), anyString());
+        doThrow(new IllegalStateException("cache redis failed"))
+                .when(idempotencyService)
+                .cacheSuccess(anyString(), anyString(), anyLong());
 
         String key = "redis-fail-" + suffix;
         BigDecimal amount = new BigDecimal("1000");
@@ -57,7 +59,8 @@ class TransferCommitCacheFailureIT extends AbstractIntegrationIT {
         assertThat(first.getStatusCode()).isEqualTo(HttpStatus.CREATED);
         Long transferId = first.getBody().getTransferId();
         verify(idempotencyService).cacheSuccess(eq(key), anyString(), eq(transferId));
-        verify(transferThrottleService).markSuccess(source, target);
+        verify(transferThrottleService).acquire(source, target);
+        verify(transferThrottleService, never()).releaseIfOwned(anyString(), anyString(), anyString());
 
         assertThat(transferRepository.countByAccountNumbers(source, target)).isEqualTo(1);
         assertThat(accountRepository.findByAccountNumber(source).orElseThrow().getBalance())
@@ -71,5 +74,32 @@ class TransferCommitCacheFailureIT extends AbstractIntegrationIT {
                 .isEqualByComparingTo(new BigDecimal("99000"));
         assertThat(accountRepository.findByAccountNumber(target).orElseThrow().getBalance())
                 .isEqualByComparingTo(new BigDecimal("1000"));
+    }
+
+    @Test
+    @DisplayName("쿨다운 획득 중 Redis 실패는 이체를 커밋하지 않는다")
+    void cooldownAcquireFailure_doesNotCommitTransfer() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String source = "SRC-CA-" + suffix;
+        String target = "TGT-CA-" + suffix;
+        seedAccount(source, new BigDecimal("100000"));
+        seedAccount(target, BigDecimal.ZERO);
+
+        doThrow(new IllegalStateException("cooldown redis failed"))
+                .when(transferThrottleService)
+                .acquire(anyString(), anyString());
+
+        ResponseEntity<String> response =
+                postTransferRaw(source, target, new BigDecimal("1000"), "cooldown-down-" + suffix);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+        assertThat(response.getBody()).contains("INTERNAL_ERROR");
+        verify(transferThrottleService).acquire(source, target);
+        verify(idempotencyService, never()).cacheSuccess(anyString(), anyString(), anyLong());
+        assertThat(transferRepository.countByAccountNumbers(source, target)).isZero();
+        assertThat(accountRepository.findByAccountNumber(source).orElseThrow().getBalance())
+                .isEqualByComparingTo(new BigDecimal("100000"));
+        assertThat(accountRepository.findByAccountNumber(target).orElseThrow().getBalance())
+                .isEqualByComparingTo(BigDecimal.ZERO);
     }
 }
