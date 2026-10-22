@@ -7,6 +7,7 @@ import com.banktransfer.dto.AccountResponse;
 import com.banktransfer.exception.NotFoundException;
 import com.banktransfer.model.Account;
 import com.banktransfer.repository.AccountRepository;
+import com.banktransfer.util.MoneyUtil;
 
 @Service
 public class AccountService {
@@ -23,7 +24,7 @@ public class AccountService {
                 .orElseThrow(() -> new NotFoundException("계좌를 찾을 수 없습니다: " + accountNumber));
         AccountResponse resp = new AccountResponse();
         resp.setAccountNumber(account.getAccountNumber());
-        resp.setBalance(account.getBalance());
+        resp.setBalance(MoneyUtil.responseAmount(account.getBalance()));
         resp.setCurrencyCode(account.getCurrencyCode());
         resp.setStatus(account.getStatus());
         return resp;

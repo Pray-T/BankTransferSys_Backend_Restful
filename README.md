@@ -49,7 +49,7 @@ BankTransferSys_Backend_Restful/
     │   │                      #  + IdempotencyRecord(Redis 캐시 POJO, 엔티티 아님)
     │   ├── repository/       # TransferIdempotencyRepository 포함
     │   ├── service/          # Transfer, Idempotency(캐시), TransferThrottle, Account
-    │   └── util/
+    │   └── util/             # HashUtil, MoneyUtil(원화 정수)
     └── resources/
         ├── application.properties
         └── application-dev.properties
@@ -59,6 +59,7 @@ src/test/
 │   ├── TransferConcurrencyIT.java      # 동시성 정합성 통합 테스트
 │   ├── TransferIdempotencyIT.java      # 멱등성/쿨다운 통합 테스트
 │   ├── TransferCommitCacheFailureIT.java # 커밋 후 Redis/쿨다운 실패 통합 테스트
+│   ├── util/MoneyUtilTest.java         # 원화 금액 단위 테스트
 │   └── support/AbstractIntegrationIT.java # 로컬 MySQL/Redis 통합 테스트 기반 클래스
 └── resources/
     └── application-test.properties
@@ -157,6 +158,8 @@ curl -i -X POST "http://localhost:8080/api/transfers" \
 }
 ```
 
+금액은 원화 정수입니다. 원화에는 소수 단위가 없으므로 `double`/`float`를 쓰지 않고, `accounts.balance`, `transfers.amount`, `account_transactions.amount`, `account_transactions.balance_after`는 `DECIMAL(19,0)`입니다. 이체 금액은 1원 이상, 정수 15자리(`999999999999999`원) 이하이며, 소수이거나 자릿수를 넘으면 `400 VALIDATION_ERROR`입니다. 생성·같은 키 재응답·조회의 금액은 소수 없는 같은 정수로 나갑니다.
+
 `Idempotency-Key`는 필수입니다. 헤더를 빼거나 공백만 보내면 `400 VALIDATION_ERROR`이고, 서버는 UUID를 만들지 않습니다. 키는 최대 128자이며 앞뒤 공백은 제거합니다.
 
 같은 키와 같은 본문(출금 계좌, 입금 계좌, 금액)으로 다시 호출하면 이중 이체 없이 **처음 이체의 `transferId`**를 `201`으로 반환합니다. 같은 키와 다른 본문은 `409 Conflict`이며 두 번째 이체를 만들지 않습니다.
@@ -181,6 +184,12 @@ curl -i "http://localhost:8080/api/transfers/1"
 
 테스트 JDBC URL은 `DB_NAME`을 읽지 않습니다. 스키마는 `TEST_DB_NAME`(기본 `bank_transfer_test`)이고, `ddl-auto=create-drop`은 이 전용 DB에만 적용됩니다. 셸에 `DB_NAME=bank_TransferSys`가 있어도 개발 DB에는 접속하지 않습니다. 해석된 카탈로그가 `bank_TransferSys`이거나, 값이 정확히 `bank_transfer_test`가 아닌 `DB_NAME`과 같으면 Hibernate가 스키마를 바꾸기 전에 기동이 실패합니다. Redis 인덱스는 `TEST_REDIS_DATABASE`(기본 `1`)이며 `0`이면 같은 지점에서 실패합니다.
 
+`ddl-auto=update`는 이미 있는 컬럼 타입을 바꾸지 않습니다. 개발 DB의 금액 컬럼이 예전 `DECIMAL(19,2)`이면 아래를 한 번 실행합니다. 이미 정수로 저장된 금액(`.00`)은 그대로이고, 테스트 DB는 `create-drop`이라 이 구문이 필요 없습니다.
+
+```sql
+ALTER TABLE accounts MODIFY balance DECIMAL(19,0) NOT NULL; ALTER TABLE transfers MODIFY amount DECIMAL(19,0) NOT NULL; ALTER TABLE account_transactions MODIFY amount DECIMAL(19,0) NOT NULL, MODIFY balance_after DECIMAL(19,0) NOT NULL;
+```
+
 `DB_USERNAME` / `DB_PASSWORD`는 앱 실행과 동일하게 환경 변수로 주입합니다.
 
 ```powershell
@@ -200,7 +209,8 @@ export DB_PASSWORD='your_mysql_password'
 | 테스트 클래스 | 검증 내용 |
 |--------------|----------|
 | `TransferConcurrencyIT` | 동일 출금 계좌 동시 이체 잔액 정합성, 교차 이체(A↔B) 데드락 부재 |
-| `TransferIdempotencyIT` | 키 생략·공백 400, 동일 키 재요청/동시 요청 단일 이체, 완료 재조회는 쿨다운 스킵, 새 키 429, payload 충돌 409, 커밋 전 실패 후 같은 키 재사용 |
+| `MoneyUtilTest` | 정상 정수, 소수·음수·0·지수 표기·자릿수 초과 거절, 응답·해시용 scale 0 |
+| `TransferIdempotencyIT` | 키 생략·공백 400, 동일 키 재요청/동시 요청 단일 이체, 완료 재조회는 쿨다운 스킵, 새 키 429, payload 충돌 409, 커밋 전 실패 후 같은 키 재사용, 소수·비정상 금액 400, 생성·재응답·조회의 금액 문자열이 같음 |
 | `TransferCommitCacheFailureIT` | 커밋 후 쿨다운 기록 실패에도 201, 같은 키 재요청은 같은 transferId이며 잔액은 다시 움직이지 않음 |
 
 ## 아키텍처 다이어그램
@@ -370,7 +380,7 @@ MySQL InnoDB 기본 격리 수준인 **REPEATABLE READ**를 유지하고, 이체
 
 재조회의 원본은 MySQL `transfer_idempotency`입니다. 이체와 **같은 트랜잭션**에 INSERT하고, 성공 시 그 행을 `SUCCESS`로 바꾸며 `transfer_id`를 연결합니다. `REQUIRES_NEW`로 따로 커밋하지 않습니다. 롤백되면 이체와 멱등성 행이 함께 사라져 같은 키를 다시 쓸 수 있습니다. 실패 상태를 별도 트랜잭션에 남기지 않습니다.
 
-같은 본문 여부는 출금 계좌, 입금 계좌, 금액의 안정적인 해시로 판단합니다.
+같은 본문 여부는 출금 계좌, 입금 계좌, 금액의 안정적인 해시로 판단합니다. 금액은 소수 없는 정수 평문(예: `1000`)으로 넣습니다.
 
 | 상태 | 응답 |
 |------|------|

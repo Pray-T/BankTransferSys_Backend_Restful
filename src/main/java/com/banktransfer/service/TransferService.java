@@ -264,15 +264,7 @@ public class TransferService {
         java.util.Objects.requireNonNull(id, "id");
         Transfer transfer = transferRepository.findById(id)
                 .orElseThrow(() -> new NotFoundException("이체를 찾을 수 없습니다: " + id));
-        TransferResponse resp = new TransferResponse();
-        resp.setTransferId(transfer.getId());
-        resp.setStatus(transfer.getStatus());
-        resp.setExecutedAt(transfer.getCompletedAt());
-        resp.setSourceAccountNumber(transfer.getSourceAccount().getAccountNumber());
-        resp.setTargetAccountNumber(transfer.getTargetAccount().getAccountNumber());
-        resp.setAmount(transfer.getAmount());
-        resp.setCurrencyCode(transfer.getCurrencyCode());
-        return resp;
+        return toResponse(transfer, null, null);
     }
 
     private void validateRequest(TransferRequest request) {
@@ -287,21 +279,20 @@ public class TransferService {
     private static String requestHash(String sourceAccountNumber, String targetAccountNumber, BigDecimal amount) {
         return HashUtil.sha256Hex(sourceAccountNumber
                 + "|" + targetAccountNumber
-                + "|" + amount.toPlainString());
+                + "|" + MoneyUtil.plain(amount));
     }
 
     private TransferResponse toResponse(Transfer transfer, BigDecimal sourceBalanceAfter, BigDecimal targetBalanceAfter) {
-        TransferResponse resp = new TransferResponse();
-        resp.setTransferId(transfer.getId());
-        resp.setStatus(transfer.getStatus());
-        resp.setExecutedAt(transfer.getCompletedAt());
-        resp.setSourceAccountNumber(transfer.getSourceAccount().getAccountNumber());
-        resp.setTargetAccountNumber(transfer.getTargetAccount().getAccountNumber());
-        resp.setAmount(transfer.getAmount());
-        resp.setCurrencyCode(transfer.getCurrencyCode());
-        resp.setSourceBalanceAfter(sourceBalanceAfter);
-        resp.setTargetBalanceAfter(targetBalanceAfter);
-        return resp;
+        return TransferResponse.of(
+                transfer.getId(),
+                transfer.getStatus(),
+                transfer.getCompletedAt(),
+                transfer.getSourceAccount().getAccountNumber(),
+                transfer.getTargetAccount().getAccountNumber(),
+                transfer.getAmount(),
+                transfer.getCurrencyCode(),
+                sourceBalanceAfter,
+                targetBalanceAfter);
     }
 
     private static boolean isIdempotencyDuplicate(Throwable ex) {

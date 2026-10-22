@@ -15,6 +15,9 @@ import jakarta.persistence.Index;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.ManyToOne;
 import jakarta.persistence.Table;
+
+import com.banktransfer.util.MoneyUtil;
+
 import lombok.AccessLevel;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
@@ -44,7 +47,7 @@ public class Transfer extends BaseTimeEntity {
     private Account targetAccount;
 
     @Setter
-    @Column(name = "amount", nullable = false, precision = 19, scale = 2)
+    @Column(name = "amount", nullable = false, precision = 19, scale = 0)
     private BigDecimal amount;
 
     @Setter
@@ -65,7 +68,7 @@ public class Transfer extends BaseTimeEntity {
                     String currencyCode) {
         this.sourceAccount = sourceAccount;
         this.targetAccount = targetAccount;
-        this.amount = amount;
+        this.amount = MoneyUtil.responseAmount(amount);
         this.currencyCode = currencyCode;
         this.status = TransferStatus.PENDING;
     }

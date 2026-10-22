@@ -24,6 +24,7 @@ import lombok.Setter;
 
 import com.banktransfer.exception.AppErrorCode;
 import com.banktransfer.exception.BusinessException;
+import com.banktransfer.util.MoneyUtil;
 
 @Getter
 @Setter
@@ -48,7 +49,7 @@ public class Account extends BaseTimeEntity {
     @Column(name = "account_number", nullable = false, length = 64)
     private String accountNumber;
 
-    @Column(name = "balance", nullable = false, precision = 19, scale = 2)
+    @Column(name = "balance", nullable = false, precision = 19, scale = 0)
     private BigDecimal balance;
 
     @Column(name = "currency_code", nullable = false, length = 3)
@@ -73,7 +74,7 @@ public class Account extends BaseTimeEntity {
             this.currencyCode = Constants.DEFAULT_CURRENCY_CODE;
         }
         if (this.balance == null) {
-            this.balance = BigDecimal.valueOf(100000).setScale(2);
+            this.balance = new BigDecimal("100000");
         }
     }
 
@@ -81,13 +82,13 @@ public class Account extends BaseTimeEntity {
         if (amount.compareTo(BigDecimal.ZERO) <= 0) {
             throw new BusinessException(AppErrorCode.VALIDATION_ERROR, "입금 금액은 0보다 커야 합니다.");
         }
-        this.balance = this.balance.add(amount);
+        this.balance = MoneyUtil.responseAmount(this.balance.add(amount));
     }
 
     public void withdraw(BigDecimal amount) {
         if (this.balance.compareTo(amount) < 0) {
             throw new BusinessException(AppErrorCode.INSUFFICIENT_BALANCE, "잔액이 부족합니다.");
         }
-        this.balance = this.balance.subtract(amount);
+        this.balance = MoneyUtil.responseAmount(this.balance.subtract(amount));
     }
 }

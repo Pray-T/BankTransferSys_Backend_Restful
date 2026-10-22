@@ -14,6 +14,9 @@ import jakarta.persistence.Index;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.ManyToOne;
 import jakarta.persistence.Table;
+
+import com.banktransfer.util.MoneyUtil;
+
 import lombok.AccessLevel;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
@@ -46,17 +49,17 @@ public class AccountTransaction extends BaseTimeEntity {
     @Column(name = "type", nullable = false, length = 16)
     private TransactionType type;
 
-    @Column(name = "amount", nullable = false, precision = 19, scale = 2)
+    @Column(name = "amount", nullable = false, precision = 19, scale = 0)
     private BigDecimal amount;
 
-    @Column(name = "balance_after", nullable = false, precision = 19, scale = 2)
+    @Column(name = "balance_after", nullable = false, precision = 19, scale = 0)
     private BigDecimal balanceAfter;
 
     public AccountTransaction(Account account, Transfer transfer, TransactionType type, BigDecimal amount, BigDecimal balanceAfter) {
         this.account = account;
         this.transfer = transfer;
         this.type = type;
-        this.amount = amount;
-        this.balanceAfter = balanceAfter;
+        this.amount = MoneyUtil.responseAmount(amount);
+        this.balanceAfter = MoneyUtil.responseAmount(balanceAfter);
     }
 }

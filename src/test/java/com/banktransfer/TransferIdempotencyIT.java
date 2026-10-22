@@ -3,6 +3,9 @@ package com.banktransfer;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.math.BigDecimal;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
@@ -15,6 +18,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+
+import javax.sql.DataSource;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -55,6 +60,9 @@ class TransferIdempotencyIT extends AbstractIntegrationIT {
 
     @Autowired
     private ObjectMapper objectMapper;
+
+    @Autowired
+    private DataSource dataSource;
 
     @Test
     @DisplayName("동일 Idempotency-Key 재요청은 이전 결과를 반환하고 이중 이체하지 않는다")
@@ -275,6 +283,115 @@ class TransferIdempotencyIT extends AbstractIntegrationIT {
 
         BigDecimal sourceBalance = accountRepository.findByAccountNumber(source).orElseThrow().getBalance();
         assertThat(sourceBalance).isEqualByComparingTo(new BigDecimal("97000"));
+    }
+
+    @Test
+    @DisplayName("첫 응답, 재응답, 조회의 금액 문자열은 같은 정수다")
+    void amountText_matchesAcrossCreateReplayAndGet() throws Exception {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String source = "SRC-KRW-" + suffix;
+        String target = "TGT-KRW-" + suffix;
+        seedAccount(source, new BigDecimal("100000"));
+        seedAccount(target, BigDecimal.ZERO);
+        assertKrwAmountColumns();
+
+        String key = "krw-scale-" + suffix;
+        ResponseEntity<String> first = postTransferRaw(source, target, new BigDecimal("1000"), key);
+        assertThat(first.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        String firstAmount = jsonNumber(first.getBody(), "amount");
+        String firstSourceBalance = jsonNumber(first.getBody(), "sourceBalanceAfter");
+        String firstTargetBalance = jsonNumber(first.getBody(), "targetBalanceAfter");
+
+        ResponseEntity<String> replay = postTransferRaw(source, target, new BigDecimal("1000"), key);
+        assertThat(replay.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        Long transferId = readTransferId(first.getBody());
+        ResponseEntity<String> fetched = restTemplate.getForEntity("/api/transfers/" + transferId, String.class);
+        assertThat(fetched.getStatusCode()).isEqualTo(HttpStatus.OK);
+
+        assertThat(firstAmount).isEqualTo("1000");
+        assertThat(jsonNumber(replay.getBody(), "amount")).isEqualTo(firstAmount);
+        assertThat(jsonNumber(fetched.getBody(), "amount")).isEqualTo(firstAmount);
+        assertThat(jsonNumber(replay.getBody(), "sourceBalanceAfter")).isEqualTo(firstSourceBalance);
+        assertThat(jsonNumber(replay.getBody(), "targetBalanceAfter")).isEqualTo(firstTargetBalance);
+        assertThat(firstSourceBalance).doesNotContain(".");
+        assertThat(firstTargetBalance).doesNotContain(".");
+        assertThat(countCompletedTransfers(source, target)).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("소수, 0, 음수, 자릿수를 넘는 지수 표기는 400이고 이체를 만들지 않는다")
+    void abnormalAmount_isRejectedWithoutTransfer() throws Exception {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String source = "SRC-BAD-" + suffix;
+        String target = "TGT-BAD-" + suffix;
+        seedAccount(source, new BigDecimal("100000"));
+        seedAccount(target, BigDecimal.ZERO);
+
+        assertRejectedAmount(source, target, "1000.6", "frac-" + suffix);
+        assertRejectedAmount(source, target, "1000.00", "scale-" + suffix);
+        assertRejectedAmount(source, target, "0", "zero-" + suffix);
+        assertRejectedAmount(source, target, "-5", "neg-" + suffix);
+        assertRejectedAmount(source, target, "1e20", "exp-" + suffix);
+
+        assertThat(accountRepository.findByAccountNumber(source).orElseThrow().getBalance())
+                .isEqualByComparingTo(new BigDecimal("100000"));
+        assertThat(countCompletedTransfers(source, target)).isZero();
+    }
+
+    private void assertRejectedAmount(String source, String target, String amountLiteral, String key) {
+        String json = "{\"sourceAccountNumber\":\"" + source
+                + "\",\"targetAccountNumber\":\"" + target
+                + "\",\"amount\":" + amountLiteral + "}";
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.set("Idempotency-Key", key);
+        ResponseEntity<ErrorResponse> response = restTemplate.exchange(
+                "/api/transfers",
+                HttpMethod.POST,
+                new HttpEntity<>(json, headers),
+                ErrorResponse.class);
+        assertThat(response.getStatusCode()).as(amountLiteral).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(response.getBody()).isNotNull();
+        assertThat(response.getBody().getCode()).isEqualTo("VALIDATION_ERROR");
+    }
+
+    private String jsonNumber(String body, String field) throws Exception {
+        JsonNode node = objectMapper.readTree(body).get(field);
+        assertThat(node).as(field).isNotNull();
+        assertThat(node.isNumber()).as(field).isTrue();
+        String plain = node.decimalValue().toPlainString();
+        assertThat(plain).as(field).doesNotContain(".");
+        return plain;
+    }
+
+    private void assertKrwAmountColumns() throws Exception {
+        try (Connection connection = dataSource.getConnection()) {
+            assertThat(connection.getCatalog()).endsWith("_test");
+            assertThat(connection.getCatalog()).isNotEqualToIgnoringCase("bank_TransferSys");
+            assertDecimal19Scale0(connection, "accounts", "balance");
+            assertDecimal19Scale0(connection, "transfers", "amount");
+            assertDecimal19Scale0(connection, "account_transactions", "amount");
+            assertDecimal19Scale0(connection, "account_transactions", "balance_after");
+        }
+    }
+
+    private static void assertDecimal19Scale0(Connection connection, String table, String column) throws Exception {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT DATA_TYPE, NUMERIC_PRECISION, NUMERIC_SCALE "
+                        + "FROM information_schema.COLUMNS "
+                        + "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?")) {
+            statement.setString(1, table);
+            statement.setString(2, column);
+            try (ResultSet rows = statement.executeQuery()) {
+                assertThat(rows.next()).as("%s.%s", table, column).isTrue();
+                assertThat(rows.getString("DATA_TYPE")).isEqualToIgnoringCase("decimal");
+                assertThat(rows.getInt("NUMERIC_PRECISION")).isEqualTo(19);
+                assertThat(rows.wasNull()).isFalse();
+                int scale = rows.getInt("NUMERIC_SCALE");
+                assertThat(rows.wasNull()).isFalse();
+                assertThat(scale).isZero();
+            }
+        }
     }
 
     private long countCompletedTransfers(String source, String target) {
