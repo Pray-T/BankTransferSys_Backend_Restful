@@ -11,6 +11,7 @@ import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.test.context.ActiveProfiles;
+import org.springframework.test.context.ContextConfiguration;
 
 import com.banktransfer.dto.TransferRequest;
 import com.banktransfer.dto.TransferResponse;
@@ -21,10 +22,13 @@ import com.banktransfer.repository.AccountRepository;
 
 /**
  * 로컬 MySQL / Redis를 사용하는 통합 테스트 기반 클래스.
- * 접속 정보는 {@code application-test.properties}와 환경 변수 {@code DB_USERNAME}/{@code DB_PASSWORD}를 따른다.
+ * 스키마는 {@code TEST_DB_NAME}(기본 {@code bank_transfer_test})만 사용하고 {@code DB_NAME}은 읽지 않는다.
+ * {@link TestDatabaseSafetyInitializer}가 Hibernate DDL 전에 개발 DB 접속을 막는다.
+ * 계정은 환경 변수 {@code DB_USERNAME}/{@code DB_PASSWORD}를 따른다.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @ActiveProfiles("test")
+@ContextConfiguration(initializers = TestDatabaseSafetyInitializer.class)
 public abstract class AbstractIntegrationIT {
 
     @Autowired

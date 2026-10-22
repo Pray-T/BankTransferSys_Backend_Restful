@@ -95,10 +95,10 @@ src/test/
 - JDK 17+
 - MySQL 8  
   - 앱 실행: `bank_TransferSys`  
-  - 통합 테스트: `bank_transfer_test` (없으면 JDBC가 생성, 테스트 종료 시 `create-drop`으로 스키마 정리)
+  - 통합 테스트: `bank_transfer_test` (`TEST_DB_NAME`만 사용하고 `DB_NAME`은 읽지 않음. 없으면 JDBC가 생성, `create-drop`은 이 스키마만 정리)
 - Redis (기본 포트: `6379`)  
   - 앱: DB index `0`  
-  - 통합 테스트: DB index `1` (앱 데이터와 분리)
+  - 통합 테스트: DB index `1` (`TEST_REDIS_DATABASE`. 앱의 `REDIS_DATABASE`와 분리)
 
 ### 설정
 
@@ -200,6 +200,8 @@ curl -i "http://localhost:8080/api/transfers/1"
 | MySQL DB | `bank_TransferSys` | `bank_transfer_test` |
 | Redis DB index | `0` | `1` |
 | 스키마 | `ddl-auto=update` (dev) | `ddl-auto=create-drop` |
+
+테스트 JDBC URL은 `DB_NAME`을 읽지 않습니다. 스키마는 `TEST_DB_NAME`(기본 `bank_transfer_test`)이고, `ddl-auto=create-drop`은 이 전용 DB에만 적용됩니다. 셸에 `DB_NAME=bank_TransferSys`가 있어도 개발 DB에는 접속하지 않습니다. 해석된 카탈로그가 `bank_TransferSys`이거나, 값이 정확히 `bank_transfer_test`가 아닌 `DB_NAME`과 같으면 Hibernate가 스키마를 바꾸기 전에 기동이 실패합니다. Redis 인덱스는 `TEST_REDIS_DATABASE`(기본 `1`)이며 `0`이면 같은 지점에서 실패합니다.
 
 `DB_USERNAME` / `DB_PASSWORD`는 앱 실행과 동일하게 환경 변수로 주입합니다.
 
