@@ -8,6 +8,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -26,9 +27,14 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.test.context.TestPropertySource;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
 import com.banktransfer.dto.ErrorResponse;
 import com.banktransfer.dto.TransferRequest;
 import com.banktransfer.dto.TransferResponse;
+import com.banktransfer.model.TransferIdempotencyStatus;
+import com.banktransfer.repository.TransferIdempotencyRepository;
 import com.banktransfer.repository.TransferRepository;
 import com.banktransfer.support.AbstractIntegrationIT;
 
@@ -44,6 +50,12 @@ class TransferIdempotencyIT extends AbstractIntegrationIT {
     @Autowired
     private TransferRepository transferRepository;
 
+    @Autowired
+    private TransferIdempotencyRepository transferIdempotencyRepository;
+
+    @Autowired
+    private ObjectMapper objectMapper;
+
     @Test
     @DisplayName("동일 Idempotency-Key 재요청은 이전 결과를 반환하고 이중 이체하지 않는다")
     void sameKeyReplay_returnsPreviousResultWithoutDoubleTransfer() {
@@ -58,17 +70,22 @@ class TransferIdempotencyIT extends AbstractIntegrationIT {
 
         ResponseEntity<TransferResponse> first = postTransfer(source, target, amount, key);
         assertThat(first.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        assertThat(first.getHeaders().getFirst("Idempotency-Key")).isEqualTo(key);
         Long transferId = first.getBody().getTransferId();
 
         ResponseEntity<TransferResponse> second = postTransfer(source, target, amount, key);
         assertThat(second.getStatusCode()).isEqualTo(HttpStatus.CREATED);
         assertThat(second.getBody().getTransferId()).isEqualTo(transferId);
+        assertThat(second.getHeaders().getFirst("Idempotency-Key")).isEqualTo(key);
 
         BigDecimal sourceBalance = accountRepository.findByAccountNumber(source).orElseThrow().getBalance();
         BigDecimal targetBalance = accountRepository.findByAccountNumber(target).orElseThrow().getBalance();
         assertThat(sourceBalance).isEqualByComparingTo(new BigDecimal("98500"));
         assertThat(targetBalance).isEqualByComparingTo(new BigDecimal("1500"));
         assertThat(countCompletedTransfers(source, target)).isEqualTo(1);
+        assertThat(transferIdempotencyRepository.findByIdempotencyKey(key)).get()
+                .extracting(row -> row.getStatus(), row -> row.getTransfer().getId())
+                .containsExactly(TransferIdempotencyStatus.SUCCESS, transferId);
     }
 
     @Test
@@ -140,6 +157,62 @@ class TransferIdempotencyIT extends AbstractIntegrationIT {
 
         assertThat(conflict.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
         assertThat(conflict.getBody().getCode()).isEqualTo("CONFLICT");
+        assertThat(transferRepository.countByAccountNumbers(source, target)).isEqualTo(1);
+        assertThat(accountRepository.findByAccountNumber(source).orElseThrow().getBalance())
+                .isEqualByComparingTo(new BigDecimal("99000"));
+        assertThat(accountRepository.findByAccountNumber(target).orElseThrow().getBalance())
+                .isEqualByComparingTo(new BigDecimal("1000"));
+    }
+
+    @Test
+    @DisplayName("Idempotency-Key 생략 또는 공백은 400이고 이체 행을 만들지 않는다")
+    void missingOrBlankKey_isRejectedWithoutTransfer() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String source = "SRC-NK-" + suffix;
+        String target = "TGT-NK-" + suffix;
+        seedAccount(source, new BigDecimal("100000"));
+        seedAccount(target, BigDecimal.ZERO);
+
+        ResponseEntity<ErrorResponse> missing = postTransferError(source, target, new BigDecimal("1000"), null);
+        assertThat(missing.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(missing.getBody().getCode()).isEqualTo("VALIDATION_ERROR");
+        assertThat(missing.getHeaders().getFirst("Idempotency-Key")).isNull();
+
+        ResponseEntity<ErrorResponse> blank = postTransferError(source, target, new BigDecimal("1000"), "   ");
+        assertThat(blank.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(blank.getBody().getCode()).isEqualTo("VALIDATION_ERROR");
+        assertThat(blank.getHeaders().getFirst("Idempotency-Key")).isNull();
+
+        assertThat(transferRepository.countByAccountNumbers(source, target)).isZero();
+    }
+
+    @Test
+    @DisplayName("커밋 전 실패는 멱등성 행을 롤백하고 같은 키로 다시 이체할 수 있다")
+    void failureBeforeCommit_rollsBackAndAllowsSameKey() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String source = "SRC-RB-" + suffix;
+        String target = "TGT-RB-" + suffix;
+        seedAccount(source, new BigDecimal("500"));
+        seedAccount(target, BigDecimal.ZERO);
+
+        String key = "rollback-" + suffix;
+        ResponseEntity<ErrorResponse> rejected =
+                postTransferError(source, target, new BigDecimal("1000"), key);
+        assertThat(rejected.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+        assertThat(rejected.getBody().getCode()).isEqualTo("INSUFFICIENT_BALANCE");
+        assertThat(transferRepository.countByAccountNumbers(source, target)).isZero();
+        assertThat(transferIdempotencyRepository.findByIdempotencyKey(key)).isEmpty();
+        assertThat(accountRepository.findByAccountNumber(source).orElseThrow().getBalance())
+                .isEqualByComparingTo(new BigDecimal("500"));
+
+        ResponseEntity<TransferResponse> retried =
+                postTransfer(source, target, new BigDecimal("200"), key);
+        assertThat(retried.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        assertThat(transferRepository.countByAccountNumbers(source, target)).isEqualTo(1);
+        assertThat(accountRepository.findByAccountNumber(source).orElseThrow().getBalance())
+                .isEqualByComparingTo(new BigDecimal("300"));
+        assertThat(accountRepository.findByAccountNumber(target).orElseThrow().getBalance())
+                .isEqualByComparingTo(new BigDecimal("200"));
     }
 
     @Test
@@ -159,7 +232,7 @@ class TransferIdempotencyIT extends AbstractIntegrationIT {
         Set<Long> transferIds = ConcurrentHashMap.newKeySet();
         AtomicInteger createdOrReplay = new AtomicInteger();
         AtomicInteger inProgress = new AtomicInteger();
-        AtomicInteger unexpected = new AtomicInteger();
+        ConcurrentLinkedQueue<String> unexpected = new ConcurrentLinkedQueue<>();
 
         List<Future<?>> futures = new ArrayList<>();
         for (int i = 0; i < threads; i++) {
@@ -170,10 +243,11 @@ class TransferIdempotencyIT extends AbstractIntegrationIT {
                         postTransferRaw(source, target, new BigDecimal("3000"), key);
                 if (response.getStatusCode() == HttpStatus.CREATED) {
                     createdOrReplay.incrementAndGet();
+                    transferIds.add(readTransferId(response.getBody()));
                 } else if (response.getStatusCode() == HttpStatus.ACCEPTED) {
                     inProgress.incrementAndGet();
                 } else {
-                    unexpected.incrementAndGet();
+                    unexpected.add(response.getStatusCode() + " " + response.getBody());
                 }
                 return null;
             }));
@@ -187,10 +261,11 @@ class TransferIdempotencyIT extends AbstractIntegrationIT {
         pool.shutdown();
         assertThat(pool.awaitTermination(10, TimeUnit.SECONDS)).isTrue();
 
-        assertThat(unexpected.get()).isZero();
+        assertThat(unexpected).isEmpty();
         assertThat(createdOrReplay.get() + inProgress.get()).isEqualTo(threads);
         assertThat(createdOrReplay.get()).isGreaterThanOrEqualTo(1);
         assertThat(countCompletedTransfers(source, target)).isEqualTo(1);
+        assertThat(transferRepository.countByAccountNumbers(source, target)).isEqualTo(1);
 
         ResponseEntity<TransferResponse> replay =
                 postTransfer(source, target, new BigDecimal("3000"), key);
@@ -204,5 +279,31 @@ class TransferIdempotencyIT extends AbstractIntegrationIT {
 
     private long countCompletedTransfers(String source, String target) {
         return transferRepository.countCompletedByAccountNumbers(source, target);
+    }
+
+    private Long readTransferId(String body) throws Exception {
+        JsonNode node = objectMapper.readTree(body);
+        return node.get("transferId").asLong();
+    }
+
+    private ResponseEntity<ErrorResponse> postTransferError(String source,
+                                                            String target,
+                                                            BigDecimal amount,
+                                                            String idempotencyKey) {
+        TransferRequest body = new TransferRequest();
+        body.setSourceAccountNumber(source);
+        body.setTargetAccountNumber(target);
+        body.setAmount(amount);
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        if (idempotencyKey != null) {
+            headers.set("Idempotency-Key", idempotencyKey);
+        }
+        return restTemplate.exchange(
+                "/api/transfers",
+                HttpMethod.POST,
+                new HttpEntity<>(body, headers),
+                ErrorResponse.class);
     }
 }

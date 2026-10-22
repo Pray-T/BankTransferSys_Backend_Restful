@@ -4,6 +4,9 @@ import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
 
+/**
+ * Redis 캐시 값. 재조회의 원본은 {@link TransferIdempotency}이다.
+ */
 @Getter
 @Setter
 @NoArgsConstructor

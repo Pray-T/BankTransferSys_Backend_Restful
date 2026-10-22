@@ -1,7 +1,6 @@
 package com.banktransfer.controller;
 
 import java.net.URI;
-import java.util.UUID;
 
 import org.springframework.http.ResponseEntity;
 import org.springframework.util.StringUtils;
@@ -29,32 +28,30 @@ import jakarta.validation.Valid;
 @Tag(name = "Transfers", description = "계좌 간 이체 API")
 public class TransferController {
 
-    private final TransferService transferService; 
+    private final TransferService transferService;
 
     public TransferController(TransferService transferService) {
         this.transferService = transferService;
     }
 
-    @Operation(summary = "이체 생성", description = "Idempotency-Key 헤더를 사용하여 중복 이체를 방지합니다.")
-    @PostMapping  
+    @Operation(
+            summary = "이체 생성",
+            description = "Idempotency-Key는 필수입니다. 같은 키와 같은 요청은 같은 이체를 반환하고, 다른 요청은 409입니다. 서버는 키를 생성하지 않습니다.")
+    @PostMapping
     public ResponseEntity<TransferResponse> createTransfer(
-            @Parameter(description = "중복 방지를 위한 키 (미제공 시 서버 자동 생성)", required = false)
+            @Parameter(description = "클라이언트가 발급한 멱등성 키 (필수, 생략·공백이면 400)", required = true)
             @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
-            @Valid @RequestBody TransferRequest request) { 
-        String resolvedKey = StringUtils.hasText(idempotencyKey)
-                ? idempotencyKey
-                : UUID.randomUUID().toString();
-
-        TransferResponse response = transferService.createTransfer(request, resolvedKey); 
+            @Valid @RequestBody TransferRequest request) {
+        TransferResponse response = transferService.createTransfer(request, idempotencyKey);
+        String echoedKey = StringUtils.hasText(idempotencyKey) ? idempotencyKey.trim() : idempotencyKey;
         return ResponseEntity.created(URI.create("/api/transfers/" + response.getTransferId()))
-                .header("Idempotency-Key", resolvedKey)
-                .body(response); 
+                .header("Idempotency-Key", echoedKey)
+                .body(response);
     }
 
     @Operation(summary = "이체 조회")
     @GetMapping("/{id}")
-    public ResponseEntity<TransferResponse> getTransfer(@PathVariable Long id) { 
-        return ResponseEntity.ok(transferService.getTransfer(id)); 
+    public ResponseEntity<TransferResponse> getTransfer(@PathVariable Long id) {
+        return ResponseEntity.ok(transferService.getTransfer(id));
     }
 }
-

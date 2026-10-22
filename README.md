@@ -6,7 +6,7 @@
 저는 팀의 일원으로서 팀원들과 함께 좋은 에너지를 만들며 일하고 싶고, 동시에 혼자 고민하는 시간을 통해 전문가로서의 역량을 기르고자 하고 적은 비용으로 어떻게 하면 많은 효과를 누릴 수 있을까? 하고 생각하는 개발자입니다.
 <br>
 <br>
-이 프로젝트는 은행 이체 REST API를 통해 **MySQL 동시성 정합성**과 **Redis 멱등성/스로틀**을 중심으로 구현했으며, 대량 데이터 **인덱스 조회**도 함께 실험했습니다.
+이 프로젝트는 은행 이체 REST API를 통해 **MySQL 동시성 정합성·멱등성**과 **Redis 캐시/쿨다운**을 중심으로 구현했으며, 대량 데이터 **인덱스 조회**도 함께 실험했습니다.
 
 ## 목차
 
@@ -42,16 +42,16 @@
 | Framework | Spring Boot 3.3.4 |
 | ORM | Spring Data JPA (Hibernate) |
 | Database | MySQL 8 |
-| Cache | Redis (멱등성키 / 쿨다운키) |
+| Cache | Redis (멱등성 캐시 / 쿨다운키). 재조회 원본은 MySQL |
 | API Docs | springdoc-openapi 2.6.0 (Swagger UI) |
 
 ## 이 프로젝트에서 증명하는 것
 
 - `SELECT ... FOR UPDATE` + **계좌번호 정렬 잠금**으로 교차 이체 데드락 방지
-- Redis **Idempotency-Key** / **쿨다운 키**로 중복·연속 이체 요청 차단
+- MySQL **Idempotency-Key**(이체와 같은 트랜잭션, 유니크 인덱스)로 중복 이체를 막고, Redis **쿨다운 키**로 연속 요청 간격을 제한
 - MySQL **Serializable 세션 실험**에서 락 대기 타임아웃을 확인한 뒤, **REPEATABLE READ + 비관적 잠금**으로 전환한 근거 문서화
 - `@Version` 낙관적 잠금을 비관적 잠금의 **추가 안전망**으로 배치 (정상 이체 경로에서는 거의 발동하지 않음)
-- 이체 성공 확정(Redis `COMPLETED`/쿨다운)을 **트랜잭션 커밋 이후(afterCommit)** 로 반영해 "DB 미커밋 + Redis 완료" 상태 불일치 방지
+- 멱등성 결과는 이체와 **같은 MySQL 트랜잭션**에 커밋하고, Redis 캐시·쿨다운만 **afterCommit**에 기록합니다. 커밋 후 Redis가 실패해도 이미 커밋된 이체는 `201`이며, 같은 키 재요청은 MySQL에서 같은 `transferId`를 돌려 두 번째 출금을 만들지 않습니다.
 - 약 200만 건 고객 데이터로 **복합 인덱스** 조회 실험
 
 ## 프로젝트 구조
@@ -69,10 +69,10 @@ BankTransferSys_Backend_Restful/
     │   ├── controller/       # Transfer, Account, DevData(dev 전용)
     │   ├── dto/
     │   ├── exception/        # GlobalExceptionHandler + 도메인 예외
-    │   ├── model/            # JPA 엔티티(Account, Customer, Transfer, AccountTransaction 등)
-    │   │                      #  + IdempotencyRecord(Redis 저장용 POJO, 엔티티 아님)
-    │   ├── repository/
-    │   ├── service/          # Transfer, Idempotency, TransferThrottle, Account
+    │   ├── model/            # JPA 엔티티(Account, Customer, Transfer, AccountTransaction, TransferIdempotency)
+    │   │                      #  + IdempotencyRecord(Redis 캐시 POJO, 엔티티 아님)
+    │   ├── repository/       # TransferIdempotencyRepository 포함
+    │   ├── service/          # Transfer, Idempotency(캐시), TransferThrottle, Account
     │   └── util/
     └── resources/
         ├── application.properties
@@ -82,6 +82,7 @@ src/test/
 ├── java/com/banktransfer/
 │   ├── TransferConcurrencyIT.java      # 동시성 정합성 통합 테스트
 │   ├── TransferIdempotencyIT.java      # 멱등성/쿨다운 통합 테스트
+│   ├── TransferCommitCacheFailureIT.java # 커밋 후 Redis/쿨다운 실패 통합 테스트
 │   └── support/AbstractIntegrationIT.java # 로컬 MySQL/Redis 통합 테스트 기반 클래스
 └── resources/
     └── application-test.properties
@@ -144,7 +145,7 @@ gradlew.bat bootRun
 
 | Method | Path | 설명 |
 |--------|------|------|
-| POST | `/api/transfers` | 이체 생성 (`Idempotency-Key` 선택, 미제공 시 서버 UUID 자동 생성) |
+| POST | `/api/transfers` | 이체 생성 (`Idempotency-Key` 필수. 생략·공백은 400, 서버는 키를 생성하지 않음) |
 | GET | `/api/transfers/{id}` | 이체 조회 |
 | GET | `/api/accounts/{accountNumber}` | 계좌번호로 계좌 조회 |
 | POST | `/api/dev/generate-accounts` | dev profile 전용 — 더미 고객·계좌 약 200만 건 생성 |
@@ -178,7 +179,9 @@ curl -i -X POST "http://localhost:8080/api/transfers" \
 }
 ```
 
-동일 `Idempotency-Key`로 다시 호출하면 이중 이체 없이 **이전 결과**를 `201`으로 반환합니다.
+`Idempotency-Key`는 필수입니다. 헤더를 빼거나 공백만 보내면 `400 VALIDATION_ERROR`이고, 서버는 UUID를 만들지 않습니다. 키는 최대 128자이며 앞뒤 공백은 제거합니다.
+
+같은 키와 같은 본문(출금 계좌, 입금 계좌, 금액)으로 다시 호출하면 이중 이체 없이 **처음 이체의 `transferId`**를 `201`으로 반환합니다. 같은 키와 다른 본문은 `409 Conflict`이며 두 번째 이체를 만들지 않습니다.
 
 **2) 이체 조회** — `GET /api/transfers/{id}`
 
@@ -217,7 +220,8 @@ export DB_PASSWORD='your_mysql_password'
 | 테스트 클래스 | 검증 내용 |
 |--------------|----------|
 | `TransferConcurrencyIT` | 동일 출금 계좌 동시 이체 잔액 정합성, 교차 이체(A↔B) 데드락 부재 |
-| `TransferIdempotencyIT` | 동일 키 재요청/동시 요청 단일 이체, COMPLETED 쿨다운 스킵, 새 키 429, payload 충돌 409 |
+| `TransferIdempotencyIT` | 키 생략·공백 400, 동일 키 재요청/동시 요청 단일 이체, 완료 재조회는 쿨다운 스킵, 새 키 429, payload 충돌 409, 커밋 전 실패 후 같은 키 재사용 |
+| `TransferCommitCacheFailureIT` | 커밋 후 쿨다운 기록 실패에도 201, 같은 키 재요청은 같은 transferId이며 잔액은 다시 움직이지 않음 |
 
 ## 아키텍처 다이어그램
 
@@ -238,12 +242,13 @@ graph TB
         TTS["TransferThrottleService"]
         AR["AccountRepository"]
         TR["TransferRepository"]
+        TIR["TransferIdempotencyRepository"]
         ATR["AccountTransactionRepository"]
         DOC["springdoc (Swagger UI)"]
     end
     subgraph DataStore["Data Store"]
-        MySQL[("MySQL\n(계좌/이체/거래내역)")]
-        Redis[("Redis\n(멱등성키/쿨다운키)")]
+        MySQL[("MySQL\n(계좌/이체/멱등성/거래내역)")]
+        Redis[("Redis\n(멱등성 캐시/쿨다운키)")]
     end
     Client -->|"POST /api/transfers"| TC
     Client -->|"GET /api/transfers/{id}"| TC
@@ -256,12 +261,14 @@ graph TB
     TS --> TTS
     TS --> AR
     TS --> TR
+    TS --> TIR
     TS --> ATR
     AS --> AR
     IS --> Redis
     TTS --> Redis
     AR --> MySQL
     TR --> MySQL
+    TIR --> MySQL
     ATR --> MySQL
     TC --> GEH
     AC --> GEH
@@ -280,76 +287,70 @@ sequenceDiagram
     participant Redis as Redis
     participant AR as AccountRepository
     participant MySQL as MySQL
-    C->>TC: POST /api/transfers<br/>(Idempotency-Key 선택, 미제공 시 UUID 자동 생성)
-    TC->>TC: key 없으면 UUID 생성
+    C->>TC: POST /api/transfers<br/>(Idempotency-Key 필수)
     TC->>TS: createTransfer(request, key)
-    Note over TS: 1단계: 요청 검증
-    TS->>TS: validateRequest()<br/>(출금=입금 계좌 여부, 금액 검증)
-    Note over TS,Redis: 2단계: 멱등성 체크 (쿨다운보다 우선)
-    TS->>IS: beginOrGetExisting(key, hash)
-    IS->>Redis: GET / SETNX(idempo:TRANSFER:key)
-    Redis-->>IS: 결과 반환
-    alt 이미 완료된 요청 (COMPLETED)
-        IS-->>TS: 기존 결과 반환
-        Note over TS: 쿨다운 스킵 — 안전 재시도 보장
-        TS-->>C: 201 Created (이전 결과)
-    else 처리 중 (PENDING) 또는 FAILED reclaim 실패
-        IS-->>TS: InProgressException
-        TS-->>C: 202 Accepted
-    else FAILED → PENDING 원자적 reclaim 성공 / 신규 키
-        IS-->>TS: newlyCreated=true (키 소유)
+    alt 키 생략 또는 공백
+        TS-->>C: 400 VALIDATION_ERROR<br/>(서버는 UUID를 만들지 않음)
+    else 키가 있음
+        Note over TS: 1단계: 요청 검증·본문 해시<br/>(출금/입금 계좌, 금액)
+        Note over TS,MySQL: 2단계: 커밋된 멱등성 행 조회 (재조회 원본)
+        TS->>MySQL: SELECT transfer_idempotency
+        alt 같은 키 + 같은 해시 + SUCCESS
+            MySQL-->>TS: 기존 Transfer
+            Note over TS: 쿨다운 스킵
+            TS-->>C: 201 Created (같은 transferId)
+        else 같은 키 + 다른 해시
+            TS-->>C: 409 Conflict
+        else 행 없음
+            Note over TS,MySQL: 3단계: 멱등성 INSERT와 이체는 같은 트랜잭션
+            TS->>MySQL: INSERT PENDING (유니크 키)
+            alt 같은 키 동시 요청 (유니크 충돌)
+                Note over TS: 상대 커밋까지 대기 후 재조회
+                TS->>MySQL: SELECT 커밋된 행
+                TS-->>C: 201 재조회 또는 409
+            else INSERT 성공
+                TS->>TTS: enforceCooldown()
+                TTS->>Redis: hasKey(trans:cooldown:출금->입금)
+                alt 쿨다운 중 (새 키의 간격 제한)
+                    TTS-->>TS: TransferCooldownException
+                    Note over MySQL: 롤백 — 아직 이체 전이라 멱등성 행만 삭제
+                    TS-->>C: 429 TOO_MANY_REQUESTS
+                else 통과
+                    TS->>AR: findByAccountNumberForUpdate (계좌번호 정렬)
+                    AR->>MySQL: SELECT ... FOR UPDATE
+                    TS->>MySQL: Transfer·분개 저장, 멱등성 SUCCESS
+                    TS->>MySQL: COMMIT
+                    Note over TS,Redis: 4단계: afterCommit 캐시·쿨다운<br/>(예외는 ERROR 로그 후 삼킴, 응답은 201)
+                    TS->>IS: cacheSuccess
+                    IS->>Redis: SET 캐시 (TTL)
+                    TS->>TTS: markSuccess
+                    TTS->>Redis: SET 쿨다운 TTL 10초
+                    TS-->>TC: TransferResponse
+                    TC-->>C: 201 Created (+ Idempotency-Key 헤더)
+                end
+            end
+        end
     end
-    Note over TS,Redis: 3단계: 쿨다운 체크 (키 소유 시에만)
-    TS->>TTS: enforceCooldown()
-    TTS->>Redis: hasKey(trans:cooldown:출금->입금)
-    Redis-->>TTS: 존재 여부 반환
-    alt 쿨다운 중
-        TTS-->>TS: TransferCooldownException
-        TS->>IS: finalizeFailure (PENDING 누수 방지)
-        TS-->>C: 429 TOO_MANY_REQUESTS
-    end
-    Note over TS,MySQL: 4단계: 계좌 잠금 (데드락 방지)
-    TS->>TS: 계좌번호 정렬 (작은 값 먼저)
-    TS->>AR: findByAccountNumberForUpdate(first)
-    AR->>MySQL: SELECT ... FOR UPDATE
-    MySQL-->>AR: 첫 번째 계좌 (잠금 획득)
-    TS->>AR: findByAccountNumberForUpdate(second)
-    AR->>MySQL: SELECT ... FOR UPDATE
-    MySQL-->>AR: 두 번째 계좌 (잠금 획득)
-    Note over TS: 5단계: 계좌 상태/통화 검증<br/>(실패 시에도 finalizeFailure)
-    Note over TS,MySQL: 6단계: 이체 실행
-    TS->>TS: source.withdraw(amount)
-    TS->>TS: target.deposit(amount)
-    TS->>MySQL: Transfer 저장 (COMPLETED)
-    TS->>MySQL: AccountTransaction 저장 (DEBIT)
-    TS->>MySQL: AccountTransaction 저장 (CREDIT)
-    Note over TS,MySQL: 7단계: 트랜잭션 커밋 (durable 보장)
-    TS->>MySQL: COMMIT
-    Note over TS,Redis: 8단계: 커밋 이후 확정 (afterCommit)
-    TS->>IS: finalizeSuccess(record, transferId)
-    IS->>Redis: SET(idempo:TRANSFER:key, COMPLETED, 잔여TTL)
-    TS->>TTS: markSuccess(source, target)
-    TTS->>Redis: SET(trans:cooldown:출금->입금, TTL 10초)
-    TS-->>TC: TransferResponse
-    TC-->>C: 201 Created (+ Idempotency-Key 헤더)
 ```
 
 ### 3. 다층 보호 구조
 
 ```mermaid
 graph LR
-    REQ["이체 요청"] --> ID{"멱등성키\n(Redis)"}
-    ID -->|"이미 완료된 요청"| R3["이전 결과 반환\n(쿨다운 스킵)"]
-    ID -->|"처리 중 / reclaim 실패"| R2["202 처리 중"]
-    ID -->|"신규 또는 FAILED reclaim"| CD{"쿨다운키\n(Redis)"}
-    CD -->|"10초 내 동일 방향(출금→입금) 재요청"| R1["429 차단"]
+    REQ["이체 요청"] --> KEY{"Idempotency-Key"}
+    KEY -->|"생략·공백"| R0["400"]
+    KEY -->|"있음"| ID{"멱등성 행\n(MySQL 유니크)"}
+    ID -->|"같은 키·같은 본문"| R3["201 같은 transferId\n(쿨다운 스킵)"]
+    ID -->|"같은 키·다른 본문"| R5["409"]
+    ID -->|"신규 키"| CD{"쿨다운키\n(Redis, 간격 제한)"}
+    CD -->|"10초 내 동일 방향 새 키"| R1["429"]
     CD -->|"통과"| PL{"비관적 잠금\nSELECT FOR UPDATE\n(MySQL)"}
     PL --> OL{"낙관적 잠금 @Version\n(안전망, 정상경로 거의 미발동)"}
     OL -->|"버전 불일치 시"| R4["409 충돌"]
-    OL -->|"정상"| OK["이체 완료"]
+    OL -->|"정상"| OK["이체·멱등성 동시 커밋"]
 ```
 
-> **역할 구분:** 멱등성키를 **먼저** 검사해 완료된 동일 요청의 재시도가 쿨다운(429)에 가려지지 않게 합니다. 쿨다운은 키를 새로 소유한 요청에만 적용되어 동일 방향 연타를 완화합니다. `FOR UPDATE`는 잔액 정합성, `@Version`은 비관적 잠금이 누락된 경로를 대비한 보조 계층입니다.
+> **역할 구분:** 재조회 원본은 MySQL입니다. 완료된 같은 키 재시도는 쿨다운(429)보다 먼저 처리합니다. 쿨다운은 **요청 간격 제한**이고 이중 출금 방지가 아닙니다. 이중 출금은 이체와 같은 트랜잭션의 유니크 키가 막습니다. `FOR UPDATE`는 잔액 정합성, `@Version`은 비관적 잠금이 누락된 경로를 대비한 보조 계층입니다.
 
 ---
 
@@ -375,7 +376,7 @@ graph LR
 동일 레코드에 대한 동시 쓰기 경쟁이 커지면 대기·타임아웃이 늘어 처리량이 급격히 떨어질 수 있습니다. Serializable은 정합성은 높지만, 동시 읽기·대량 처리 관점의 비용이 큽니다. “격리 수준만 올리면 된다”는 접근은 이체 도메인에 그대로 쓰기 어렵다고 판단했습니다.
 
 **애플리케이션에 적용한 해결:**  
-MySQL InnoDB 기본 격리 수준인 **REPEATABLE READ**를 유지하고, 이체 시점에만 `SELECT ... FOR UPDATE`로 필요한 계좌를 잠급니다. 여기에 Redis 멱등성키·쿨다운키, `@Version`을 더해 다층으로 보호합니다.
+MySQL InnoDB 기본 격리 수준인 **REPEATABLE READ**를 유지하고, 이체 시점에만 `SELECT ... FOR UPDATE`로 필요한 계좌를 잠급니다. 여기에 MySQL 멱등성 유니크 키, Redis 쿨다운키, `@Version`을 더해 다층으로 보호합니다.
 
 > **P.S) 격리 수준 설정:** 본 프로젝트 코드에는 `@Transactional(isolation = ...)` 또는 `hibernate.connection.isolation`을 두지 않았습니다. 정합성은 **비관적 잠금 + 낙관적 잠금(안전망)** 으로 보장합니다.
 
@@ -385,36 +386,40 @@ MySQL InnoDB 기본 격리 수준인 **REPEATABLE READ**를 유지하고, 이체
 엔티티 수정 시 version이 증가하고, UPDATE 시점에 불일치하면 트랜잭션이 실패합니다(`409`). 이체 경로는 이미 `FOR UPDATE`로 직렬화되므로 정상 흐름에서는 거의 발동하지 않습니다. 비관적 잠금이 누락된 코드 경로를 대비한 **저비용 안전망**으로 두었습니다.
 
 **멱등성키 (Idempotency-Key)**  
-이체 요청 헤더의 고유 키로 동일 요청의 재시도를 안전하게 처리합니다. 헤더 생략 시 서버가 UUID를 생성하고 응답 헤더에 반환합니다.
+클라이언트가 발급한 헤더입니다. **필수**이며, 생략·공백은 `400 VALIDATION_ERROR`입니다. 서버는 키를 생성하지 않습니다. 응답이 유실돼도 클라이언트가 같은 키로 다시 보내면 처음 이체를 찾을 수 있습니다.
+
+재조회의 원본은 MySQL `transfer_idempotency`입니다. 이체와 **같은 트랜잭션**에 INSERT하고, 성공 시 그 행을 `SUCCESS`로 바꾸며 `transfer_id`를 연결합니다. `REQUIRES_NEW`로 따로 커밋하지 않습니다. 롤백되면 이체와 멱등성 행이 함께 사라져 같은 키를 다시 쓸 수 있습니다. 실패 상태를 별도 트랜잭션에 남기지 않습니다.
+
+같은 본문 여부는 출금 계좌, 입금 계좌, 금액의 안정적인 해시로 판단합니다.
 
 | 상태 | 응답 |
 |------|------|
-| 처리 중 (PENDING) 동일 키 재요청 | `202 Accepted` — “요청이 처리 중입니다.” |
-| 완료 (COMPLETED) 동일 키 재요청 | `201 Created` — 이전 이체 결과 반환 (**쿨다운 검사 전**에 처리) |
-| 실패 (FAILED) 동일 키 재요청 | reclaim 락으로 `FAILED→PENDING` 원자 전환 후 재시도. 동시 재획득 실패 시 `202` |
-| 동일 키 + 다른 payload | `409 Conflict` |
+| 헤더 생략·공백 | `400` — 이체 행 없음. 서버는 UUID를 만들지 않음 |
+| 같은 키 + 같은 본문 (`SUCCESS`) | `201 Created` — 원래 `transferId` (**쿨다운 검사 전**) |
+| 같은 키 + 다른 본문 | `409 Conflict` — 추가 이체 없음 |
+| 커밋 전 실패 (잔액 부족, 검증, 없음 등) | 해당 비즈니스 오류. 멱등성 행도 롤백되어 같은 키 재사용 가능 |
+| 같은 키 동시 요청 | 유니크 인덱스에서 대기한 뒤 커밋된 행을 재조회. 이체는 하나 |
 
-- Redis 키: `idempo:TRANSFER:{Idempotency-Key}`
-- TTL: **24시간(86400s)** — 트랜잭션/락 대기보다 길게 설정해 PENDING 만료로 인한 이중 이체·COMPLETED 미기록을 방지
-- 검증·이체 실패 시 `finalizeFailure`로 `FAILED`를 기록해 **PENDING 누수**를 막습니다.
+- 유니크 인덱스: `transfer_idempotency.uk_transfer_idempotency_key` (`idempotency_key`)
+- MySQL `SUCCESS` 행은 TTL로 지우지 않습니다. 지우면 같은 키로 다시 출금할 수 있습니다.
+- Redis 캐시 키: `idempo:TRANSFER:{Idempotency-Key}` (요청 경로에서 재조회하지 않음)
+- Redis TTL: **24시간(86400s)** — 캐시에만 적용
 
-**P.S) 커밋-Redis 정합성 (afterCommit 확정)**  
-성공 확정(`COMPLETED` 기록 + 쿨다운 설정)은 이체 로직 도중이 아니라 `TransactionSynchronization.afterCommit()`에서 실행합니다. DB가 **durable하게 커밋된 뒤에만** Redis에 반영하므로, 이체 저장 후 커밋이 실패해도 Redis에는 `COMPLETED`가 남지 않습니다.
+**P.S) 커밋 후 Redis (캐시·쿨다운)**  
+멱등성 `SUCCESS`는 커밋 전에 MySQL에 있습니다. `afterCommit`은 Redis 캐시와 쿨다운만 기록합니다. 여기서 예외가 나면 SLF4J `ERROR`로 남기고 삼키며, HTTP 응답은 바꾸지 않습니다. 이미 커밋된 이체는 `201`이고, 같은 키 재요청은 MySQL을 봐서 같은 `transferId`를 반환합니다. Redis가 죽어도 그 키로 한 번 더 출금되지 않습니다.
 
 | 시점 | 처리 |
 |------|------|
-| 이체 로직 중 예외 | `finalizeFailure`(`FAILED`) 후 롤백 — PENDING 누수 방지 |
-| 커밋 성공 | `afterCommit`에서 `finalizeSuccess`(`COMPLETED`) + 쿨다운 설정 |
-| 저장 성공 후 **커밋 실패** | `afterCommit` 미실행 → Redis는 `PENDING` 유지 → TTL이 24h로 길어져 만료 회수는 느림. **실패 기록(`FAILED`)된 키의 실질 재시도·회수는 `reclaim`(FAILED→PENDING)** |
+| 이체 로직 중 예외 | 트랜잭션 롤백 — 이체와 PENDING 멱등성 행이 함께 삭제 |
+| 커밋 성공 | MySQL에 이체 + `SUCCESS`가 이미 있음. `afterCommit`에서 Redis 캐시 + 쿨다운 |
+| 커밋 후 Redis/쿨다운 실패 | 이체는 유지. 응답은 `201`. 같은 키 재조회는 MySQL |
 
-이체가 실제로 커밋되지 않았는데 멱등성 캐시가 `COMPLETED`로 남아, 이후 재조회(`findById`)가 실패하는 상태 불일치를 방지하기 위한 설계입니다. (트랜잭션 동기화가 비활성인 예외적 상황에서는 즉시 반영으로 폴백합니다.)
-
-**P.S) 진행 중 요청: Polling vs Fast-Fail**  
-PENDING 중복 요청에 대해 서버에서 폴링 대기 후 결과를 주는 방식도 검토했으나, 스레드 점유와 실패 시 대기 연장 리스크 때문에 **즉시 202 반환(Fast-Fail)** 을 선택했습니다.
+**P.S) 같은 키 동시 요청**  
+나중 요청은 유니크 인덱스에서 먼저 커밋되는 트랜잭션을 기다린 다음, 커밋된 행을 읽어 재조회하거나(`201`) 본문이 다르면 `409`를 반환합니다. 두 번째 이체를 만들지 않습니다.
 
 **쿨다운키 (Cooldown Key)**  
 **동일한 출금 → 입금 방향** 이체가 성공한 뒤 10초 안에 **새 멱등성 키**로 다시 들어오면 `429 Too Many Requests`로 차단합니다. (역방향 B→A는 별도 키.)  
-멱등성키(안전 재시도)와 달리 **연타·남용성 연속 요청**을 줄이는 목적이며, **COMPLETED 재조회 경로에는 적용하지 않습니다.**
+이것은 **요청 간격 제한**입니다. 이중 출금 방지 장치가 아니며, **같은 키 재조회에는 적용하지 않습니다.** 쿨다운이 지나거나 Redis 기록이 실패해도 같은 키는 MySQL 멱등성 행이 막습니다.
 
 - Redis 키: `trans:cooldown:{출금계좌}->{입금계좌}`
 - TTL: **10초** (데모용)
@@ -481,6 +486,7 @@ WHERE name LIKE 'ql%'
 | `accounts` | `idx_account_balance` | balance | 잔액 조건 조회 |
 | `accounts` | `uq_account_number` | account_number (UNIQUE) | 계좌번호 유일성 |
 | `transfers` | `idx_transfer_created_at` | created_at | 최신 이체 내역 조회 |
+| `transfer_idempotency` | `uk_transfer_idempotency_key` | idempotency_key (UNIQUE) | 멱등성 키 재조회·동시 중복 차단 |
 | `account_transactions` | `idx_account_tx_account` | account_id | 계좌별 거래내역 조회 |
 | `account_transactions` | `idx_account_tx_transfer` | transfer_id | 이체별 거래내역 조회 |
 

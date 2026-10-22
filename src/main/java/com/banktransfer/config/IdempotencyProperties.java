@@ -10,6 +10,6 @@ import lombok.Setter;
 @ConfigurationProperties(prefix = "app.idempotency")
 public class IdempotencyProperties {
 
-    /** 기본 24시간. PENDING 키 만료로 인한 이중 이체/COMPLETED 미기록을 방지합니다. */
+    /** Redis 캐시 TTL(초). 재조회 원본은 MySQL이며 이 값으로 SUCCESS 행을 지우지 않는다. */
     private int ttlSeconds = 86400;
 }
