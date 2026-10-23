@@ -715,7 +715,7 @@ class TransferIdempotencyIT extends AbstractIntegrationIT {
     }
 
     private long countCompletedTransfers(String source, String target) {
-        return transferRepository.countCompletedByAccountNumbers(source, target);
+        return transferCountTestRepository.countCompletedByAccountNumbers(source, target);
     }
 
     private static String cooldownKey(String source, String target) {

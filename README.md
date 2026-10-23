@@ -6,7 +6,7 @@
 저는 팀의 일원으로서 팀원들과 함께 좋은 에너지를 만들며 일하고 싶고, 동시에 혼자 고민하는 시간을 통해 전문가로서의 역량을 기르고자 하고 적은 비용으로 어떻게 하면 많은 효과를 누릴 수 있을까? 하고 생각하는 개발자입니다.
 <br>
 <br>
-이 프로젝트는 은행 이체 REST API를 통해 **MySQL 동시성 정합성·멱등성**과 **Redis 캐시/쿨다운**을 중심으로 구현했으며, 대량 데이터 **인덱스 조회**도 함께 실험했습니다.
+이 프로젝트는 은행 이체 REST API를 통해 **MySQL 동시성 정합성·멱등성**과 **Redis 캐시/쿨다운**을 중심으로 구현했습니다.
 
 
 
@@ -28,7 +28,6 @@
 - MySQL **Serializable 세션 실험**에서 락 대기 타임아웃을 확인한 뒤, **REPEATABLE READ + 비관적 잠금**으로 전환한 근거 문서화
 - `@Version` 낙관적 잠금을 비관적 잠금의 **추가 안전망**으로 배치 (정상 이체 경로에서는 거의 발동하지 않음)
 - 멱등성 결과는 이체와 **같은 MySQL 트랜잭션**에 커밋합니다. 쿨다운 키는 커밋 전에 Redis `SET key value NX EX`로 원자적으로 잡습니다. 같은 방향의 새 키가 동시에 들어와도 둘 다 통과하지 못하고, 롤백된 이체는 그 키를 해제합니다. 커밋된 이체는 키를 유지합니다. 같은 키 재조회는 새 쿨다운 획득이 아닙니다. Redis 멱등성 캐시만 **afterCommit**에 기록하며, 캐시 기록이 실패해도 이미 커밋된 이체는 `201`이고 같은 키 재요청은 MySQL에서 같은 `transferId`를 돌려 두 번째 출금을 만들지 않습니다.
-- 약 200만 건 고객 데이터로 **복합 인덱스** 조회 실험
 
 ## 프로젝트 구조
 
@@ -208,6 +207,7 @@ ALTER TABLE account_transactions DROP INDEX idx_account_tx_transfer, ADD UNIQUE 
 ALTER TABLE accounts DROP INDEX idx_account_balance;
 ALTER TABLE transfers DROP INDEX idx_transfer_created_at;
 ALTER TABLE account_transactions DROP INDEX idx_account_tx_account;
+ALTER TABLE customers DROP INDEX idx_customer_name_combined;
 ```
 
 `DB_USERNAME` / `DB_PASSWORD`는 앱 실행과 동일하게 환경 변수로 주입합니다.
@@ -485,20 +485,25 @@ Account secondAcc = accountRepository.findByAccountNumberForUpdate(second);
 
 ---
 
-## 인덱스 실험
+## 인덱스
 
-이체 정합성과는 별도로, MySQL **복합 인덱스·카디널리티·좌측 접두사**를 확인하기 위한 보조 실험입니다.
+### 프로젝트에 정의된 주요 인덱스
 
-- **인덱스:** `idx_customer_name_combined (name, bank, gender)` — 카디널리티가 높은 `name`을 앞에 배치
-- **애플리케이션 조회:** `CustomerRepository.findByNameAndBank`, `existsByNameAndBank` (`name`, `bank` 동등 조건. 좌측 접두사 `name, bank`를 사용)
-- **수동 실험 조건:** `name LIKE 'ql%'` + `bank = 'WOORI'` + `gender = 'MALE'` (아래 SQL은 API가 아니라, 같은 인덱스를 MySQL에서 직접 확인하는 실험)
+| 테이블 | 인덱스명 | 컬럼 | 프로덕션 조회 |
+|--------|---------|------|----------------|
+| `accounts` | `uq_account_number` | account_number (UNIQUE) | `AccountRepository.findByAccountNumber`, `findByAccountNumberForUpdate` (비관적 잠금) |
+| `transfer_idempotency` | `uk_transfer_idempotency_key` | idempotency_key (UNIQUE) | `TransferIdempotencyRepository.findByIdempotencyKey`. 같은 키 동시 삽입 차단 |
+| `account_transactions` | `uk_account_tx_transfer_type` | transfer_id, type (UNIQUE) | 이체·유형당 원장 1건. `AccountTransactionRepository.findByTransferIdAndType` |
 
-### 재현 방법
+`balance_after`는 이체 시점 잔액의 근거입니다. 재응답과 단건 조회는 계좌의 현재 잔액 대신 이 값을 읽으며, `findByTransferIdAndType`이 `(transfer_id, type)` 유니크 인덱스를 사용합니다. `transfer_id`만 있던 `idx_account_tx_transfer`는 그 왼쪽 컬럼과 겹쳐 제거했습니다.
 
-1. 애플리케이션을 dev profile로 실행합니다.
-2. `POST /api/dev/generate-accounts`로 `customers`에 약 200만 건을 생성합니다.
-3. 복합 인덱스가 DDL에 반영되었는지 확인합니다.
-4. 아래 쿼리로 `EXPLAIN`과 실행 시간을 비교합니다.
+계좌로 원장을 거르는 프로덕션 조회가 없어서 `idx_account_tx_account`(`account_id`)는 제거했습니다. 이체 목록을 `created_at`으로 조회하는 쿼리가 없어서 `idx_transfer_created_at`도 제거했습니다. 잔액 조건 조회가 없어서 `idx_account_balance`도 제거했습니다. 이름·은행·성별로 고객을 찾는 프로덕션 조회가 없어서 `idx_customer_name_combined`(name, bank, gender)도 제거했습니다. `transfers`의 단건 조회는 기본 키(`TransferRepository.findById`)를 사용합니다.
+
+### 과거 수동 EXPLAIN
+
+아래 기록은 애플리케이션 조회가 아닙니다. 예전에 `customers.idx_customer_name_combined (name, bank, gender)`가 있던 개발 DB에서, MySQL 클라이언트로 직접 실행한 `EXPLAIN`입니다. 이 인덱스를 타는 프로덕션 쿼리는 없었고, 엔티티에서도 빠졌습니다. `ddl-auto=update`는 기존 개발 DB의 인덱스를 지우지 않으므로, 남아 있으면 테스트 절의 `DROP INDEX`를 한 번 실행합니다.
+
+당시 수동 조건은 `name LIKE 'ql%'` + `bank = 'WOORI'` + `gender = 'MALE'`이었습니다.
 
 ```sql
 EXPLAIN
@@ -508,22 +513,7 @@ WHERE name LIKE 'ql%'
   AND gender = 'MALE';
 ```
 
-### 프로젝트에 정의된 주요 인덱스
-
-| 테이블 | 인덱스명 | 컬럼 | 프로덕션 조회 |
-|--------|---------|------|----------------|
-| `customers` | `idx_customer_name_combined` | name, bank, gender | `CustomerRepository.findByNameAndBank`, `existsByNameAndBank` (`name`, `bank` 좌측 접두사) |
-| `accounts` | `uq_account_number` | account_number (UNIQUE) | `AccountRepository.findByAccountNumber`, `findByAccountNumberForUpdate` (비관적 잠금). `TransferRepository.countCompletedByAccountNumbers`의 계좌번호 조건 |
-| `transfer_idempotency` | `uk_transfer_idempotency_key` | idempotency_key (UNIQUE) | `TransferIdempotencyRepository.findByIdempotencyKey`. 같은 키 동시 삽입 차단 |
-| `account_transactions` | `uk_account_tx_transfer_type` | transfer_id, type (UNIQUE) | 이체·유형당 원장 1건. `AccountTransactionRepository.findByTransferIdAndType` |
-
-`balance_after`는 이체 시점 잔액의 근거입니다. 재응답과 단건 조회는 계좌의 현재 잔액 대신 이 값을 읽으며, `findByTransferIdAndType`이 `(transfer_id, type)` 유니크 인덱스를 사용합니다. `transfer_id`만 있던 `idx_account_tx_transfer`는 그 왼쪽 컬럼과 겹쳐 제거했습니다.
-
-계좌로 원장을 거르는 프로덕션 조회가 없어서 `idx_account_tx_account`(`account_id`)는 제거했습니다. 이체 목록을 `created_at`으로 조회하는 쿼리가 없어서 `idx_transfer_created_at`도 제거했습니다. 잔액 조건 조회가 없어서 `idx_account_balance`도 제거했습니다. `transfers`의 단건 조회는 기본 키(`TransferRepository.findById`)를 사용합니다.
-
-### 측정 결과 (참고)
-
-로컬 MySQL에서 동일 조건 조회 시, 인덱스 미적용 약 **0.031s**, 적용 후 약 **0.016s**로 측정되었습니다(약 48% 단축).
+로컬 MySQL에서 이 수동 조회를 실행했을 때, 인덱스 미적용 약 **0.031s**, 적용 후 약 **0.016s**로 측정되었습니다(약 48% 단축). 이 숫자는 현재 애플리케이션 쿼리의 성능이 아닙니다.
 
 **인덱스 사용 전:**
 

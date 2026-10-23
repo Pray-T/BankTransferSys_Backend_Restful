@@ -19,4 +19,13 @@ public interface TransferCountTestRepository extends Repository<Transfer, Long> 
             """)
     long countByAccountNumbers(@Param("source") String source,
                                @Param("target") String target);
+
+    @Query("""
+            select count(t) from Transfer t
+            where t.sourceAccount.accountNumber = :source
+              and t.targetAccount.accountNumber = :target
+              and t.status = com.banktransfer.model.TransferStatus.COMPLETED
+            """)
+    long countCompletedByAccountNumbers(@Param("source") String source,
+                                        @Param("target") String target);
 }

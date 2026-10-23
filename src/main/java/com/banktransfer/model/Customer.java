@@ -9,7 +9,6 @@ import jakarta.persistence.Entity;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
-import jakarta.persistence.Index;
 import jakarta.persistence.OneToMany;
 import jakarta.persistence.Table;
 import lombok.AccessLevel;
@@ -21,12 +20,7 @@ import lombok.Setter;
 @Setter
 @NoArgsConstructor
 @Entity
-@Table(
-    name = "customers",
-    indexes = {
-        @Index(name = "idx_customer_name_combined", columnList = "name, bank, gender")
-    }
-)
+@Table(name = "customers")
 public class Customer extends BaseTimeEntity {
 
     public static final String GENDER_MALE = "MALE";
