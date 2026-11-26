@@ -3,33 +3,40 @@
 <br>
 <br>
 안녕하세요 먼저 귀한 시간을 내어 저의 깃허브에 방문해 주신 것에 감사드립니다.<br/>
-저는 팀의 일원으로서 팀원들과 함께 좋은 에너지를 만들며 일하고 싶고, 동시에 혼자 고민하는 시간을 통해 전문가로서의 역량을 기르고자 하고 적은 비용으로 어떻게 하면 많은 효과를 누릴 수 있을까? 하고 생각하는 개발자입니다.
 <br>
-<br>
-이 프로젝트는 은행 이체 REST API를 통해 **MySQL 동시성 정합성·멱등성**과 **Redis 캐시/쿨다운**을 중심으로 구현했습니다.
+이 프로젝트는 Real Mysql 8.0을 읽다가 생겨난 DB에 관한 궁금증으로 시작 프로젝트입니다. **MySQL 동시성 정합성·멱등성**을 중심으로 이체를 구현하고, 부수적으로 **Redis 캐시/쿨다운**을 활용했으며 **복합인덱스의 사용**으로 조회 시간을 실험한 은행 이체를 REST API를 통해 구현한 프로젝트입니다.
 
 
 
 ## 기술 스택
 
+<details>
+<summary>클릭시 펼쳐집니다.</summary>
+
 | 구분 | 기술 |
 |------|------|
 | Language | Java 17 |
 | Framework | Spring Boot 3.3.4 |
-| ORM | Spring Data JPA (Hibernate) |
-| Database | MySQL 8 |
-| Cache | Redis (멱등성 캐시 / 쿨다운키). 재조회 원본은 MySQL |
+| ORM | Spring Data JPA  |
+| Database | MySQL 8 (재조회 원본) |
+| Cache | Redis (멱등성 캐시 / 쿨다운키)|
 | API Docs | springdoc-openapi 2.6.0 (Swagger UI) |
+
+</details>
 
 ## 이 프로젝트에서 증명하는 것
 
 - `SELECT ... FOR UPDATE` + **계좌번호 정렬 잠금**으로 교차 이체 데드락 방지
-- MySQL **Idempotency-Key**(이체와 같은 트랜잭션, 유니크 인덱스)로 중복 이체를 막고, Redis **쿨다운 키**로 연속 요청 간격을 제한
-- MySQL **Serializable 세션 실험**에서 락 대기 타임아웃을 확인한 뒤, **REPEATABLE READ + 비관적 잠금**으로 전환한 근거 문서화
-- `@Version` 낙관적 잠금을 비관적 잠금의 **추가 안전망**으로 배치 (정상 이체 경로에서는 거의 발동하지 않음)
-- 멱등성 결과는 이체와 **같은 MySQL 트랜잭션**에 커밋합니다. 쿨다운 키는 커밋 전에 Redis `SET key value NX EX`로 원자적으로 잡습니다. 같은 방향의 새 키가 동시에 들어와도 둘 다 통과하지 못하고, 롤백된 이체는 그 키를 해제합니다. 커밋된 이체는 키를 유지합니다. 같은 키 재조회는 새 쿨다운 획득이 아닙니다. Redis 멱등성 캐시만 **afterCommit**에 기록하며, 캐시 기록이 실패해도 이미 커밋된 이체는 `201`이고 같은 키 재요청은 MySQL에서 같은 `transferId`를 돌려 두 번째 출금을 만들지 않습니다.
+- MySQL의 **Idempotency-Key**(이체와 같은 트랜잭션, 유니크 인덱스) 컬럼으로 중복 이체를 막고, Redis **쿨다운 키**로 연속 요청 간격을 제한합니다.
+- MySQL **Serializable 세션 실험**에서 락 대기로 인한 타임아웃을 확인한 뒤, **REPEATABLE READ + 이체 시에만 비관적 잠금**으로 전환합니다.
+- `@Version` 낙관적 잠금을 비관적 잠금의 **추가 안전망**으로 배치했습니다. (정상 이체 경로에서는 거의 발동하지 않습니다)
+- 멱등성 결과는 이체와 **같은 MySQL 트랜잭션**에 커밋합니다. 쿨다운 키는 커밋 전에 Redis `SET key value NX EX`로 원자적으로 잡습니다. 같은 방향의 새 키가 동시에 들어와도 둘 다 통과하지 못하고, 롤백된 이체는 그 키를 해제합니다. 커밋된 이체는 키를 유지합니다. 같은 키 재조회는 새 쿨다운 획득이 아닙니다. <br>
+Redis 멱등성 캐시만 **afterCommit**에 기록하며, 캐시 기록이 실패해도 이미 커밋된 이체는 `201`이고 같은 키 재요청은 MySQL에서 같은 `transferId`를 돌려 두 번째 출금을 만들지 않습니다.
 
 ## 프로젝트 구조
+
+<details>
+<summary>클릭시 펼쳐집니다.</summary>
 
 ```
 BankTransferSys_Backend_Restful/
@@ -59,12 +66,22 @@ src/test/
 │   ├── TransferIdempotencyIT.java      # 멱등성/쿨다운 통합 테스트
 │   ├── TransferCommitCacheFailureIT.java # 커밋 후 캐시 실패·쿨다운 획득 실패 통합 테스트
 │   ├── util/MoneyUtilTest.java         # 원화 금액 단위 테스트
-│   └── support/AbstractIntegrationIT.java # 로컬 MySQL/Redis 통합 테스트 기반 클래스
+│   ├── repository/TransferCountTestRepository.java # 테스트 전용 완료 건수 조회
+│   └── support/
+│       ├── AbstractIntegrationIT.java  # 로컬 MySQL/Redis 통합 테스트 기반 클래스
+│       ├── TestDatabaseSafetyGuard.java
+│       ├── TestDatabaseSafetyGuardTest.java
+│       └── TestDatabaseSafetyInitializer.java
 └── resources/
     └── application-test.properties
 ```
 
+</details>
+
 ## 실행 방법
+
+<details>
+<summary>클릭시 펼쳐집니다.</summary>
 
 ### 사전 요구사항
 
@@ -119,6 +136,8 @@ gradlew.bat bootRun
 - Swagger UI: [http://localhost:8080/swagger-ui.html](http://localhost:8080/swagger-ui.html)
 - OpenAPI JSON: [http://localhost:8080/api-docs](http://localhost:8080/api-docs)
 
+</details>
+
 ## API 목록
 
 | Method | Path | 설명 |
@@ -130,9 +149,8 @@ gradlew.bat bootRun
 
 ### 빠른 체험 (curl 예시)
 
-앱이 `8080`에서 실행 중이고, 출금/입금 계좌가 DB에 이미 있어야 합니다. (Windows는 `curl` 대신 `curl.exe`를 권장합니다.)
-
-**1) 이체 생성** — `POST /api/transfers`
+<details>
+<summary>클릭시 펼쳐집니다.</summary>
 
 ```bash
 curl -i -X POST "http://localhost:8080/api/transfers" \
@@ -141,7 +159,7 @@ curl -i -X POST "http://localhost:8080/api/transfers" \
   -d "{\"sourceAccountNumber\":\"1000000001\",\"targetAccountNumber\":\"1000000002\",\"amount\":1000}"
 ```
 
-성공 시 응답 예시 (`201 Created`, 응답 헤더에 `Idempotency-Key: demo-key-001`):
+`201 Created` 응답 필드:
 
 ```json
 {
@@ -157,74 +175,9 @@ curl -i -X POST "http://localhost:8080/api/transfers" \
 }
 ```
 
-금액은 원화 정수입니다. 원화에는 소수 단위가 없으므로 `double`/`float`를 쓰지 않고, `accounts.balance`, `transfers.amount`, `account_transactions.amount`, `account_transactions.balance_after`는 `DECIMAL(19,0)`입니다. 이체 금액은 1원 이상, 정수 15자리(`999999999999999`원) 이하입니다. 1원 미만, 소수점 표기(`1000.6`, `1000.00`), 15자리를 넘는 값은 반올림하지 않고 `400 VALIDATION_ERROR`입니다. 생성·같은 키 재응답·조회의 금액은 소수 없는 같은 정수로 나갑니다.
-
-`Idempotency-Key`는 필수입니다. 헤더를 빼거나 공백만 보내면 `400 VALIDATION_ERROR`이고, 서버는 UUID를 만들지 않습니다. 앞뒤 공백은 제거합니다. 공백을 뺀 키가 128자를 넘거나 ASCII가 아니면 `400 VALIDATION_ERROR`입니다.
-
-같은 키와 같은 본문(출금 계좌, 입금 계좌, 금액)으로 다시 호출하면 이중 이체 없이 **처음 이체의 `transferId`**를 `201`으로 반환합니다. `sourceBalanceAfter`와 `targetBalanceAfter`는 계좌의 현재 잔액이 아니라, 그 이체가 커밋될 때 원장 `account_transactions.balance_after`에 적어 둔 출금·입금 잔액입니다. 출금·입금 원장 중 하나라도 없으면 `500`입니다. 이후 다른 이체로 잔액이 바뀌어도 재응답은 처음과 같고, 돈은 다시 움직이지 않습니다. 같은 키와 다른 본문은 `409 Conflict`이며 두 번째 이체를 만들지 않습니다. 키는 대소문자를 구분하므로 `AbC`와 `abc`는 같은 키의 재조회가 아닙니다.
-
-**2) 이체 조회** — `GET /api/transfers/{id}`
-
-```bash
-curl -i "http://localhost:8080/api/transfers/1"
-```
-
-응답 본문 필드는 위 `TransferResponse`와 동일합니다 (`200 OK`). 잔액도 같은 원장 `balance_after`입니다. 없는 이체는 `404`이고, 원장 행이 없으면 `500`입니다.
+</details>
 
 ## 테스트
-
-로컬에서 실행 중인 MySQL·Redis에 연결해 동시성·멱등성 통합 테스트를 검증합니다. (Docker / Testcontainers 불필요)
-
-| 구분 | 앱 (`bootRun`) | 테스트 (`test`) |
-|------|-----------------|-----------------|
-| MySQL DB | `bank_TransferSys` | `bank_transfer_test` |
-| Redis DB index | `0` | `1` |
-| 스키마 | `ddl-auto=update` (dev) | `ddl-auto=create-drop` |
-
-테스트 JDBC URL은 `DB_NAME`을 읽지 않습니다. 스키마는 `TEST_DB_NAME`(기본 `bank_transfer_test`)이고, `ddl-auto=create-drop`은 이 전용 DB에만 적용됩니다. 셸에 `DB_NAME=bank_TransferSys`가 있어도 개발 DB에는 접속하지 않습니다. 기동 가드는 `DB_NAME`을 스키마로 쓰지 않고 해석된 카탈로그와만 비교합니다. 카탈로그가 대소문자와 관계없이 `bank_TransferSys`이거나, 대소문자를 가리지 않고 `_test`로 끝나지 않거나, 값이 정확히 `bank_transfer_test`가 아닌 `DB_NAME`과 대소문자 무시로 같으면 Hibernate가 스키마를 바꾸기 전에 기동이 실패합니다. Redis 인덱스는 `TEST_REDIS_DATABASE`(기본 `1`)이며 1 이상의 정수가 아니면 같은 지점에서 실패합니다.
-
-`ddl-auto=update`는 이미 있는 컬럼 타입을 바꾸지 않습니다. 개발 DB의 금액 컬럼이 예전 `DECIMAL(19,2)`이면 아래를 한 번 실행합니다. 이미 정수로 저장된 금액(`.00`)은 그대로이고, 테스트 DB는 `create-drop`이라 이 구문이 필요 없습니다.
-
-```sql
-ALTER TABLE accounts MODIFY balance DECIMAL(19,0) NOT NULL; ALTER TABLE transfers MODIFY amount DECIMAL(19,0) NOT NULL; ALTER TABLE account_transactions MODIFY amount DECIMAL(19,0) NOT NULL, MODIFY balance_after DECIMAL(19,0) NOT NULL;
-```
-
-`ddl-auto=update`는 이미 있는 컬럼의 collation도 바꾸지 않습니다. 개발 DB의 `transfer_idempotency.idempotency_key`가 기본 collation이면 아래를 한 번 실행합니다. 테스트 DB는 `create-drop`이라 이 구문이 필요 없습니다.
-
-```sql
-ALTER TABLE transfer_idempotency MODIFY idempotency_key VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin NOT NULL;
-```
-
-`ddl-auto=update`는 이미 있는 테이블에 유니크 인덱스를 항상 더하지 않고, 겹치는 기존 인덱스 `idx_account_tx_transfer`를 지우지도 않습니다. 개발 DB에 그 인덱스만 있으면 아래를 한 번 실행합니다. 테스트 DB는 `create-drop`이라 이 구문이 필요 없습니다.
-
-```sql
-ALTER TABLE account_transactions DROP INDEX idx_account_tx_transfer, ADD UNIQUE INDEX uk_account_tx_transfer_type (transfer_id, type);
-```
-
-`ddl-auto=update`는 엔티티에서 뺀 보조 인덱스도 지우지 않습니다. 개발 DB에 남아 있으면 해당 인덱스만 한 번 지웁니다. 테스트 DB는 `create-drop`이라 이 구문이 필요 없습니다.
-
-```sql
-ALTER TABLE accounts DROP INDEX idx_account_balance;
-ALTER TABLE transfers DROP INDEX idx_transfer_created_at;
-ALTER TABLE account_transactions DROP INDEX idx_account_tx_account;
-ALTER TABLE customers DROP INDEX idx_customer_name_combined;
-```
-
-`DB_USERNAME` / `DB_PASSWORD`는 앱 실행과 동일하게 환경 변수로 주입합니다.
-
-```powershell
-# Windows (PowerShell)
-$env:DB_USERNAME='your_mysql_user'
-$env:DB_PASSWORD='your_mysql_password'
-.\gradlew.bat test
-```
-
-```bash
-# macOS / Linux
-export DB_USERNAME='your_mysql_user'
-export DB_PASSWORD='your_mysql_password'
-./gradlew test
-```
 
 | 테스트 클래스 | 검증 내용 |
 |--------------|----------|
@@ -235,139 +188,50 @@ export DB_PASSWORD='your_mysql_password'
 
 ## 아키텍처 다이어그램
 
-### 1. 시스템 구성도
+### 이체 처리 흐름
 
 ```mermaid
-graph TB
-    Client["Client (REST API 요청)"]
+flowchart TD
+    A["POST /api/transfers"] --> B{"Idempotency-Key"}
+    B -->|"생략·공백·128자 초과·비ASCII"| R400["400"]
+    B -->|"유효"| C{"커밋된 멱등성 행"}
 
-    subgraph SpringBoot["Spring Boot Application"]
-        TC["TransferController"]
-        AC["AccountController"]
-        DC["DevDataController (dev)"]
-        GEH["GlobalExceptionHandler"]
-        TS["TransferService"]
-        AS["AccountService"]
-        IS["IdempotencyService"]
-        TTS["TransferThrottleService"]
-        AR["AccountRepository"]
-        TR["TransferRepository"]
-        TIR["TransferIdempotencyRepository"]
-        ATR["AccountTransactionRepository"]
-        DOC["springdoc (Swagger UI)"]
-    end
-    subgraph DataStore["Data Store"]
-        MySQL[("MySQL\n(계좌/이체/멱등성/거래내역)")]
-        Redis[("Redis\n(멱등성 캐시/쿨다운키)")]
-    end
-    Client -->|"POST /api/transfers"| TC
-    Client -->|"GET /api/transfers/{id}"| TC
-    Client -->|"GET /api/accounts/{accountNumber}"| AC
-    Client -->|"POST /api/dev/generate-accounts"| DC
-    Client --> DOC
-    TC --> TS
-    AC --> AS
-    TS --> IS
-    TS --> TTS
-    TS --> AR
-    TS --> TR
-    TS --> TIR
-    TS --> ATR
-    AS --> AR
-    IS --> Redis
-    TTS --> Redis
-    AR --> MySQL
-    TR --> MySQL
-    TIR --> MySQL
-    ATR --> MySQL
-    TC --> GEH
-    AC --> GEH
+    C -->|"같은 키 · 같은 본문"| R201["201 같은 transferId"]
+    C -->|"같은 키 · 다른 본문"| R409["409"]
+    C -->|"없음"| D["같은 트랜잭션에 PENDING INSERT"]
+
+    D -->|"유니크 충돌"| E{"커밋된 행 재조회"}
+    E -->|"같은 본문"| R201
+    E -->|"다른 본문"| R409
+    E -->|"재시도 후에도 없음"| R202["202 IN_PROGRESS"]
+
+    D -->|"INSERT 성공"| F{"쿨다운 SET NX EX"}
+    F -->|"같은 방향이 이미 있음"| R429["429 후 롤백"]
+    F -->|"획득"| G["계좌번호 순 FOR UPDATE"]
+
+    G -->|"잔액 부족 등"| RRoll["롤백 · 이번 쿨다운 해제"]
+    G -->|"이체 성공"| H["COMMIT 이체 + SUCCESS"]
+    H --> I["afterCommit 멱등성 캐시"]
+    I --> R201
 ```
 
-### 2. 이체 처리 흐름 (Sequence Diagram)
+### 다층 보호 구조
 
 ```mermaid
-sequenceDiagram
-    autonumber
-    participant C as Client
-    participant TC as TransferController
-    participant TS as TransferService
-    participant TTS as TransferThrottleService
-    participant IS as IdempotencyService
-    participant Redis as Redis
-    participant AR as AccountRepository
-    participant MySQL as MySQL
-    C->>TC: POST /api/transfers<br/>(Idempotency-Key 필수)
-    TC->>TS: createTransfer(request, key)
-    alt 키 생략·공백·128자 초과·ASCII 아님
-        TS-->>C: 400 VALIDATION_ERROR<br/>(서버는 UUID를 만들지 않음)
-    else 키가 있음
-        Note over TS: 1단계: 요청 검증·본문 해시<br/>(출금/입금 계좌, 금액)
-        Note over TS,MySQL: 2단계: 커밋된 멱등성 행 조회 (재조회 원본)
-        TS->>MySQL: SELECT transfer_idempotency
-        alt 같은 키 + 같은 해시 + SUCCESS
-            MySQL-->>TS: 기존 Transfer
-            Note over TS: 쿨다운 스킵
-            TS-->>C: 201 Created (같은 transferId)
-        else 같은 키 + 다른 해시
-            TS-->>C: 409 Conflict
-        else 행 없음
-            Note over TS,MySQL: 3단계: 멱등성 INSERT와 이체는 같은 트랜잭션
-            TS->>MySQL: INSERT PENDING (유니크 키)
-            alt 같은 키 동시 요청 (유니크 충돌)
-                Note over TS: 유니크 키에서 대기한 뒤 커밋된 행을 다시 읽음. 이체 행은 하나
-                TS->>MySQL: SELECT 커밋된 행
-                alt 같은 본문이고 행이 커밋됨
-                    TS-->>C: 201 재조회 (돈은 다시 움직이지 않음)
-                else 다른 본문
-                    TS-->>C: 409
-                else 락 대기 재시도 후에도 커밋된 행이 안 보임
-                    TS-->>C: 202 IN_PROGRESS<br/>(실패 아님. 같은 키로 재시도)
-                end
-            else INSERT 성공
-                TS->>TTS: acquire()
-                TTS->>Redis: SET trans:cooldown:출금->입금 token NX EX 10
-                alt 키를 차지하지 못함 (새 키의 간격 제한)
-                    TTS-->>TS: TransferCooldownException
-                    Note over MySQL: 롤백 — 멱등성 행 삭제. 기존 쿨다운 키는 유지
-                    TS-->>C: 429 TOO_MANY_REQUESTS
-                else 키 획득
-                    TS->>AR: findByAccountNumberForUpdate (계좌번호 정렬)
-                    AR->>MySQL: SELECT ... FOR UPDATE
-                    alt 잔액 부족 등 롤백
-                        TTS->>Redis: 자기 토큰일 때만 DEL
-                        Note over MySQL: 이체·멱등성 행 롤백, 쿨다운 키 해제
-                        TS-->>C: 비즈니스 오류
-                    else 이체 성공
-                        TS->>MySQL: Transfer·분개 저장, 멱등성 SUCCESS
-                        TS->>MySQL: COMMIT
-                        Note over TS,Redis: 쿨다운 키는 TTL까지 유지<br/>afterCommit은 멱등성 캐시만<br/>(예외는 ERROR 로그 후 삼킴, 응답은 201)
-                        TS->>IS: cacheSuccess
-                        IS->>Redis: SET 캐시 (TTL)
-                        TS-->>TC: TransferResponse
-                        TC-->>C: 201 Created (+ Idempotency-Key 헤더)
-                    end
-                end
-            end
-        end
-    end
-```
+flowchart TD
+    REQ["이체 요청"] --> L1{"1. 키 형식"}
+    L1 -->|"거절"| A400["400"]
+    L1 -->|"통과"| L2{"2. MySQL 유니크 키"}
 
-### 3. 다층 보호 구조
+    L2 -->|"같은 본문"| A201["201 재조회 · 쿨다운 스킵"]
+    L2 -->|"다른 본문"| A409["409"]
+    L2 -->|"신규 키"| L3{"3. Redis 쿨다운"}
 
-```mermaid
-graph LR
-    REQ["이체 요청"] --> KEY{"Idempotency-Key"}
-    KEY -->|"생략·공백·128자 초과·비ASCII"| R0["400"]
-    KEY -->|"있음"| ID{"멱등성 행\n(MySQL 유니크)"}
-    ID -->|"같은 키·같은 본문"| R3["201 같은 transferId\n(쿨다운 스킵)"]
-    ID -->|"같은 키·다른 본문"| R5["409"]
-    ID -->|"신규 키"| CD{"쿨다운키\n(SET NX, 커밋 전)"}
-    CD -->|"10초 내 동일 방향 새 키"| R1["429"]
-    CD -->|"통과"| PL{"비관적 잠금\nSELECT FOR UPDATE\n(MySQL)"}
-    PL --> OL{"낙관적 잠금 @Version\n(안전망, 정상경로 거의 미발동)"}
-    OL -->|"버전 불일치 시"| R4["409 충돌"]
-    OL -->|"정상"| OK["이체·멱등성 동시 커밋"]
+    L3 -->|"간격 안"| A429["429"]
+    L3 -->|"통과"| L4["4. FOR UPDATE"]
+    L4 --> L5["5. @Version 안전망"]
+    L5 -->|"버전 불일치"| A409b["409"]
+    L5 -->|"정상"| OK["이체 · 멱등성 동시 커밋"]
 ```
 
 > **역할 구분:** 재조회 원본은 MySQL입니다. 완료된 같은 키 재시도는 쿨다운(429)보다 먼저 처리합니다. 쿨다운은 **요청 간격 제한**이고 이중 출금 방지가 아닙니다. 이중 출금은 이체와 같은 트랜잭션의 유니크 키가 막습니다. `FOR UPDATE`는 잔액 정합성, `@Version`은 비관적 잠금이 누락된 경로를 대비한 보조 계층입니다.
@@ -408,10 +272,6 @@ MySQL InnoDB 기본 격리 수준인 **REPEATABLE READ**를 유지하고, 이체
 **멱등성키 (Idempotency-Key)**  
 클라이언트가 발급한 헤더입니다. **필수**이며, 생략·공백·128자 초과·ASCII가 아닌 값은 `400 VALIDATION_ERROR`입니다. 서버는 키를 생성하지 않습니다. 응답이 유실돼도 클라이언트가 같은 키로 다시 보내면 처음 이체를 찾을 수 있습니다.
 
-재조회의 원본은 MySQL `transfer_idempotency`입니다. 이체와 **같은 트랜잭션**에 INSERT하고, 성공 시 그 행을 `SUCCESS`로 바꾸며 `transfer_id`를 연결합니다. `REQUIRES_NEW`로 따로 커밋하지 않습니다. 롤백되면 이체와 멱등성 행이 함께 사라져 같은 키를 다시 쓸 수 있습니다. 실패 상태를 별도 트랜잭션에 남기지 않습니다.
-
-키는 대소문자를 구분합니다. MySQL 기본 collation은 대소문자를 같은 문자로 보므로, `idempotency_key`에는 바이너리 collation(`ascii` / `ascii_bin`)을 씁니다.
-
 같은 본문 여부는 출금 계좌, 입금 계좌, 금액의 안정적인 해시로 판단합니다. 금액은 소수 없는 정수 평문(예: `1000`)으로 넣습니다.
 
 | 상태 | 응답 |
@@ -423,7 +283,7 @@ MySQL InnoDB 기본 격리 수준인 **REPEATABLE READ**를 유지하고, 이체
 | 같은 키 + 다른 본문 | `409 Conflict` — 추가 이체 없음 |
 | 커밋 전 실패 (잔액 부족, 검증, 없음 등) | 해당 비즈니스 오류. 멱등성 행도 롤백되어 같은 키 재사용 가능 |
 | 같은 키 동시 요청 | 진 쪽은 유니크 키에서 대기한 뒤 커밋된 행을 다시 읽음. 같은 본문이고 커밋됐으면 `201` 재조회(돈은 다시 움직이지 않음). 다른 본문은 `409`. 이체 행은 하나 |
-| 락 대기 재시도 후에도 커밋된 행이 안 보임 | `202` — 본문 code `IN_PROGRESS`, message `요청이 처리 중입니다`. 실패가 아님. 같은 키로 재시도. 커밋 전에 새 키를 보내면 두 번째 이체가 시작될 수 있음. 이체 행은 여전히 하나 |
+| 락 대기 재시도 후에도 커밋된 행이 안 보임 | `202` — 본문 code `IN_PROGRESS`, message `요청이 처리 중입니다`. 실패가 아님. 같은 키로 재시도. 같은 방향의 새 키는 쿨다운이 이미 잡혀 있으면 `429`(본문 code `TRANSFER_COOLDOWN`)이고 두 번째 이체는 커밋되지 않음. 반대 방향은 쿨다운 키가 달라 별도 이체가 커밋될 수 있음 |
 
 - 유니크 인덱스: `transfer_idempotency.uk_transfer_idempotency_key` (`idempotency_key` 한 컬럼, collation `ascii_bin`)
 - MySQL `SUCCESS` 행은 TTL로 지우지 않습니다. 지우면 같은 키로 다시 출금할 수 있습니다.
@@ -440,10 +300,10 @@ MySQL InnoDB 기본 격리 수준인 **REPEATABLE READ**를 유지하고, 이체
 | 커밋 후 캐시 실패 | 이체는 유지. 응답은 `201`. 같은 키 재조회는 MySQL. 쿨다운 키도 유지 |
 
 **P.S) 같은 키 동시 요청**  
-나중 요청은 유니크 인덱스에서 먼저 커밋되는 트랜잭션을 기다린 다음, 커밋된 행을 다시 읽습니다. 같은 본문이고 행이 커밋됐으면 `201`로 원래 이체를 재조회하며, 돈은 다시 움직이지 않습니다. 본문이 다르면 `409`입니다. 락 대기 재시도 후에도 커밋된 행이 아직 보이지 않으면 HTTP `202`이고, 본문 code는 `IN_PROGRESS`, message는 `요청이 처리 중입니다`와 같습니다. `202`는 실패가 아닙니다. 클라이언트는 같은 키로 다시 보내야 합니다. 첫 요청이 커밋되기 전에 새 키를 보내면 두 번째 이체가 시작될 수 있습니다. 이체 행은 여전히 하나입니다.
+나중 요청은 유니크 인덱스에서 먼저 커밋되는 트랜잭션을 기다린 다음, 커밋된 행을 다시 읽습니다. 같은 본문이고 행이 커밋됐으면 `201`로 원래 이체를 재조회하며, 돈은 다시 움직이지 않습니다. 본문이 다르면 `409`입니다. 락 대기 재시도 후에도 커밋된 행이 아직 보이지 않으면 HTTP `202`이고, 본문 code는 `IN_PROGRESS`, message는 `요청이 처리 중입니다`와 같습니다. `202`는 실패가 아닙니다. 클라이언트는 같은 키로 다시 보내야 합니다. 첫 요청이 쿨다운 키를 잡은 뒤 커밋되기 전에 같은 방향의 새 키를 보내면 `429`이고, 두 번째 이체는 커밋되지 않습니다. 반대 방향은 쿨다운 키가 다르므로 별도 이체가 커밋될 수 있습니다.
 
 **쿨다운키 (Cooldown Key)**  
-**동일한 출금 → 입금 방향**의 **새 멱등성 키**는 이체가 커밋되기 전에 Redis `SET key value NX EX` 한 번으로 쿨다운 키를 원자적으로 잡습니다. 키를 차지하지 못하면 `429 Too Many Requests`입니다. 그래서 같은 방향의 서로 다른 새 키가 동시에 들어와도 둘 다 통과하지 못합니다. 키 존재만 먼저 확인하고 커밋 뒤에 따로 기록하면, 둘 다 키가 없음을 본 뒤 각자 이체를 커밋할 수 있었습니다.
+**동일한 출금 → 입금 방향**의 **새 멱등성 키**는 이체가 커밋되기 전에 Redis `SET key value NX EX` 한 번으로 쿨다운 키를 원자적으로 잡습니다. 키를 차지하지 못하면 HTTP `429`이고, 본문 code는 `TRANSFER_COOLDOWN`입니다. 그래서 같은 방향의 서로 다른 새 키가 동시에 들어와도 둘 다 통과하지 못합니다. 키 존재만 먼저 확인하고 커밋 뒤에 따로 기록하면, 둘 다 키가 없음을 본 뒤 각자 이체를 커밋할 수 있었습니다.
 
 이체가 롤백되면(잔액 부족, 검증 실패 등) 자기가 넣은 값일 때만 키를 지워, 다음 정상 요청이 TTL 동안 막히지 않게 합니다. 커밋된 이체는 키를 TTL 동안 유지합니다. 같은 키 재조회는 새 쿨다운 획득이 아니며 `429`로 막지 않습니다. (역방향 B→A는 별도 키.)
 
@@ -494,16 +354,13 @@ Account secondAcc = accountRepository.findByAccountNumberForUpdate(second);
 | `accounts` | `uq_account_number` | account_number (UNIQUE) | `AccountRepository.findByAccountNumber`, `findByAccountNumberForUpdate` (비관적 잠금) |
 | `transfer_idempotency` | `uk_transfer_idempotency_key` | idempotency_key (UNIQUE) | `TransferIdempotencyRepository.findByIdempotencyKey`. 같은 키 동시 삽입 차단 |
 | `account_transactions` | `uk_account_tx_transfer_type` | transfer_id, type (UNIQUE) | 이체·유형당 원장 1건. `AccountTransactionRepository.findByTransferIdAndType` |
+| `customers` | `idx_customer_name_combined` | name, bank, gender | 이체 API 조회 없음. dev DB 수동 EXPLAIN |
 
-`balance_after`는 이체 시점 잔액의 근거입니다. 재응답과 단건 조회는 계좌의 현재 잔액 대신 이 값을 읽으며, `findByTransferIdAndType`이 `(transfer_id, type)` 유니크 인덱스를 사용합니다. `transfer_id`만 있던 `idx_account_tx_transfer`는 그 왼쪽 컬럼과 겹쳐 제거했습니다.
+### 인덱스 사용에 따른 조회 시간 
 
-계좌로 원장을 거르는 프로덕션 조회가 없어서 `idx_account_tx_account`(`account_id`)는 제거했습니다. 이체 목록을 `created_at`으로 조회하는 쿼리가 없어서 `idx_transfer_created_at`도 제거했습니다. 잔액 조건 조회가 없어서 `idx_account_balance`도 제거했습니다. 이름·은행·성별로 고객을 찾는 프로덕션 조회가 없어서 `idx_customer_name_combined`(name, bank, gender)도 제거했습니다. `transfers`의 단건 조회는 기본 키(`TransferRepository.findById`)를 사용합니다.
+`customers.idx_customer_name_combined (name, bank, gender)`는 이체 API가 타는 인덱스가 아닙니다. dev DB에 고객 약 200만 건을 만든 뒤, MySQL 클라이언트에서 직접 실행한 조회입니다. `ddl-auto=update`는 엔티티에 있는 이 인덱스가 개발 DB에 없으면 추가합니다.
 
-### 과거 수동 EXPLAIN
-
-아래 기록은 애플리케이션 조회가 아닙니다. 예전에 `customers.idx_customer_name_combined (name, bank, gender)`가 있던 개발 DB에서, MySQL 클라이언트로 직접 실행한 `EXPLAIN`입니다. 이 인덱스를 타는 프로덕션 쿼리는 없었고, 엔티티에서도 빠졌습니다. `ddl-auto=update`는 기존 개발 DB의 인덱스를 지우지 않으므로, 남아 있으면 테스트 절의 `DROP INDEX`를 한 번 실행합니다.
-
-당시 수동 조건은 `name LIKE 'ql%'` + `bank = 'WOORI'` + `gender = 'MALE'`이었습니다.
+수동 조건은 `name LIKE 'ql%'` + `bank = 'WOORI'` + `gender = 'MALE'`입니다.
 
 ```sql
 EXPLAIN
@@ -513,7 +370,7 @@ WHERE name LIKE 'ql%'
   AND gender = 'MALE';
 ```
 
-로컬 MySQL에서 이 수동 조회를 실행했을 때, 인덱스 미적용 약 **0.031s**, 적용 후 약 **0.016s**로 측정되었습니다(약 48% 단축). 이 숫자는 현재 애플리케이션 쿼리의 성능이 아닙니다.
+로컬 MySQL에서 이 수동 조회를 실행했을 때, 인덱스 미적용 약 **0.031s**, 적용 후 약 **0.016s**로 측정되었습니다(약 48% 단축). 이 숫자는 이체 API가 아니라 위 조회의 측정값입니다.
 
 **인덱스 사용 전:**
 
@@ -529,7 +386,7 @@ WHERE name LIKE 'ql%'
 
 ## 다른 포트폴리오
 
-- [Cursor Agent로 GitHub Copilot을 저렴하게 사용해보기](https://github.com/Pray-T/GitHub-Copilot-With-Cursor.git)
-- [AWS에 배포·운영한 JWT+Redis 이중 토큰 인증과 실시간 채팅 웹 앱](https://github.com/Pray-T/ReadyPlz-Production_main.git)
+- [자연어 프롬프트를 사용하여 3자의 깃허브에 기여를 할 수 있는 앱](https://github.com/Pray-T/GitHub-Copilot-With-Cursor.git)
+- [AWS에 배포했던 전세계 Steam 유저 채팅 앱](https://github.com/Pray-T/ReadyPlz-Production_main.git)
 
 **이상입니다, 저의 깃허브 방문을 감사드립니다.**

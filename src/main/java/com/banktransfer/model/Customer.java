@@ -9,6 +9,7 @@ import jakarta.persistence.Entity;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
+import jakarta.persistence.Index;
 import jakarta.persistence.OneToMany;
 import jakarta.persistence.Table;
 import lombok.AccessLevel;
@@ -20,8 +21,20 @@ import lombok.Setter;
 @Setter
 @NoArgsConstructor
 @Entity
-@Table(name = "customers")
+@Table(
+        name = "customers",
+        indexes = {
+                @Index(
+                        name = Customer.INDEX_NAME_BANK_GENDER,
+                        columnList = "name, bank, gender")
+        }
+)
 public class Customer extends BaseTimeEntity {
+
+    /**
+     * dev DB 수동 EXPLAIN용. 이체 API는 이 컬럼으로 고객을 조회하지 않는다.
+     */
+    public static final String INDEX_NAME_BANK_GENDER = "idx_customer_name_combined";
 
     public static final String GENDER_MALE = "MALE";
     public static final String GENDER_FEMALE = "FEMALE";
